@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    container_name: family_planner
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      # Код смонтирован — правки видны после `docker compose restart bot`,
+      # пересборка нужна только при смене requirements.txt или Dockerfile
+      - ./bot:/app/bot:ro
+      - ./alembic:/app/alembic:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

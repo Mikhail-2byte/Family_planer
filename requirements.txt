@@ -1,0 +1,9 @@
+aiogram>=3.31,<4
+SQLAlchemy[asyncio]>=2.0,<2.1
+aiosqlite>=0.20
+alembic>=1.14
+pydantic-settings>=2.6
+httpx>=0.28
+python-dateutil>=2.9
+dateparser>=1.2
+tzdata>=2024.2

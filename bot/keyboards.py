@@ -1,0 +1,78 @@
+from aiogram.filters.callback_data import CallbackData
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
+
+BTN_TODAY = "📅 Сегодня"
+BTN_BUY = "🛒 Покупки"
+BTN_TASKS = "✅ Задачи"
+BTN_NOTES = "📝 Заметки"
+BTN_NEW = "➕ Новое"
+
+
+def main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_TODAY), KeyboardButton(text=BTN_TASKS)],
+            [
+                KeyboardButton(text=BTN_BUY),
+                KeyboardButton(text=BTN_NOTES),
+                KeyboardButton(text=BTN_NEW),
+            ],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+class PageCB(CallbackData, prefix="page"):
+    view: str  # 'tasks' | 'notes'
+    offset: int
+
+
+class DoneCB(CallbackData, prefix="done"):
+    entry_id: int
+    offset: int
+
+
+def entry_list_keyboard(
+    entries, view: str, offset: int, total: int, page_size: int
+) -> InlineKeyboardMarkup | None:
+    """Ряд кнопок «закрыть N-ю запись» + навигация. None, если нечего показывать."""
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if view == "tasks" and entries:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"✅ {i}",
+                    callback_data=DoneCB(entry_id=e.id, offset=offset).pack(),
+                )
+                for i, e in enumerate(entries, start=1)
+            ][:8]
+        )
+
+    nav = []
+    if offset > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="←",
+                callback_data=PageCB(
+                    view=view, offset=max(0, offset - page_size)
+                ).pack(),
+            )
+        )
+    if offset + page_size < total:
+        nav.append(
+            InlineKeyboardButton(
+                text="→",
+                callback_data=PageCB(view=view, offset=offset + page_size).pack(),
+            )
+        )
+    if nav:
+        rows.append(nav)
+
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None

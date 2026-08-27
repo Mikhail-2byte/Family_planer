@@ -1,0 +1,13 @@
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+parse.log
+token.json
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
