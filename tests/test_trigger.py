@@ -82,6 +82,29 @@ async def test_ordinary_talk_is_ignored(text):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/today",
+        "/tday@Family_vlasov_planner_bot",  # опечатка в команде + упоминание
+        "/start",
+    ],
+)
+async def test_commands_are_not_addressed_to_the_model(text):
+    """Команды разбирают свои роутеры; до фильтра доходят только несуществующие.
+
+    Без этой ветки опечатка в команде считалась бы обращением по упоминанию и
+    стоила бы вызова модели.
+    """
+    assert await _check(text) is False
+
+
+@pytest.mark.asyncio
+async def test_command_in_reply_to_bot_is_still_not_a_trigger():
+    assert await _check("/today", reply_from_id=777) is False
+
+
+@pytest.mark.asyncio
 async def test_reply_to_a_human_is_ignored():
     assert await _check("да, давай", reply_from_id=42) is False
 

@@ -78,6 +78,10 @@ MAX_DAY_ITEMS = 15
 # минус заголовок недели, до семи заголовков дней и хвост остаётся ~3900
 # символов на строки, то есть ~130 на строку с учётом HTML-тегов
 MAX_WEEK_ITEMS = 30
+# Тот же лимит, но как число: разбор LLM наращивает не человек, а модель, и
+# потолок по числу элементов (`parsing.MAX_ITEMS`) длину не ограничивает —
+# десять записей с длинными заголовками и телами дают под 17 000 символов
+MESSAGE_LIMIT = 4096
 
 DONE_CONFIRMED = "Готово: {title}"
 DONE_ALREADY = "Эта запись уже закрыта."
@@ -90,6 +94,11 @@ CAPTURE_UNCERTAIN = (
     "<i>В разборе не уверен — проверьте перед сохранением.</i>"
 )
 CAPTURE_CANCELLED = "Отменено, ничего не записал."
+# Карточку нельзя обрезать: подтвердить можно только то, что видно целиком
+CAPTURE_TOO_LONG = (
+    "Разбор вышел слишком длинным, чтобы показать его целиком, — "
+    "ничего не записал. Скажите короче или заведите запись через /new."
+)
 # Черновики живут в памяти и не переживают перезапуск бота
 CAPTURE_STALE = "Эта карточка устарела — напишите фразу заново."
 CAPTURE_ALIEN = "Это карточка другого чата."
@@ -148,6 +157,27 @@ def family_member(name: str, count: int) -> str:
 def capture_rrule_bad(rule: str) -> str:
     """Правило приходит от модели, а `<` в нём ломает отправку целиком."""
     return CAPTURE_RRULE_BAD.format(rule=_escape(rule))
+
+
+def join_under_limit(blocks: list[str]) -> str:
+    """Склеить блоки, не перерастив лимит Telegram.
+
+    Резать готовое сообщение посередине нельзя: обрыв внутри HTML-тега
+    превращает отправку в `can't parse entities`, то есть в потерю всего
+    сообщения — ровно того исхода, от которого спасаемся. Поэтому лишние блоки
+    отбрасываются целиком, а на их месте остаётся счётчик.
+
+    Первый блок короткий (заголовок), так что пустым результат не бывает.
+    """
+    kept: list[str] = []
+    for i, block in enumerate(blocks):
+        if len("\n\n".join([*kept, block])) > MESSAGE_LIMIT:
+            tail = MORE_ITEMS.format(count=len(blocks) - i)
+            if len("\n\n".join([*kept, tail])) <= MESSAGE_LIMIT:
+                kept.append(tail)
+            break
+        kept.append(block)
+    return "\n\n".join(kept)
 
 
 def _author_suffix(entry: Entry, tz: str, now: datetime | None = None) -> str:

@@ -35,6 +35,12 @@ class IsTrigger(BaseFilter):
         if not text:
             return False
 
+        # Команды разбирают свои роутеры, и до сюда доходят только те, которым
+        # хендлера нет. Опечатка вида `/tday@bot` — обращение по всем признакам
+        # (упоминание), но платить за неё вызовом модели незачем
+        if text.startswith("/"):
+            return False
+
         if text.startswith(TRIGGER_PREFIX):
             return self._payload(text[len(TRIGGER_PREFIX) :])
 

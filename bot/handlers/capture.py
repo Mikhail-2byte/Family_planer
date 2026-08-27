@@ -103,9 +103,16 @@ async def capture(
         await message.answer(texts.CAPTURE_EMPTY)
         return
 
-    card = await message.answer(
-        texts.capture_card(items, family.tz), reply_markup=kb.capture_keyboard()
-    )
+    preview = texts.capture_card(items, family.tz)
+    if len(preview) > texts.MESSAGE_LIMIT:
+        # Обрезать карточку нельзя: человек подтвердил бы кнопкой то, чего не
+        # видел. А отправить как есть — значит получить отказ Telegram и
+        # промолчать на пустом месте
+        log.warning("Разбор длиной %s символов не показать", len(preview))
+        await message.answer(texts.CAPTURE_TOO_LONG)
+        return
+
+    card = await message.answer(preview, reply_markup=kb.capture_keyboard())
     _remember(
         (message.chat.id, card.message_id),
         Draft(family.id, items, message.message_id),
@@ -184,7 +191,10 @@ async def _save(
         await session.refresh(entry, ["author"])
         cards.append(texts.entry_card(entry, family.tz, now))
 
-    return "\n\n".join([texts.SAVED, *cards, *notes])
+    # Здесь, в отличие от карточки, обрезка безопасна: записи уже в базе, и
+    # подрезается только эхо. А вот отказ Telegram по длине оставил бы человека
+    # с крутящимся «часиком» над уже сохранёнными записями — и он нажал бы ещё раз
+    return texts.join_under_limit([texts.SAVED, *cards, *notes])
 
 
 async def _remind(

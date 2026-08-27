@@ -11,7 +11,7 @@ from bot import keyboards as kb
 from bot import texts
 from bot.db.models import Entry, Reminder
 from bot.handlers import capture
-from bot.services import llm
+from bot.services import llm, parsing
 from bot.services import timeutil as tu
 
 MSK = "Europe/Moscow"
@@ -325,6 +325,43 @@ async def test_several_items_become_several_entries(
 async def test_card_numbers_several_items(carded):
     message, _ = await carded(_reply(_item(title="Молоко"), _item(title="Хлеб")))
     assert "1. " in message.texts[0] and "2. " in message.texts[0]
+
+
+@pytest.mark.asyncio
+async def test_overlong_parse_is_refused_before_anything_is_saved(carded):
+    """Telegram на 4096 символах отвечает отказом, а не обрезает сам.
+
+    Обрезать карточку нельзя — человек подтвердил бы кнопкой то, чего не видел,
+    — поэтому такой разбор отклоняется целиком.
+    """
+    huge = [_item(title="я" * 500, body="б" * 1000) for _ in range(10)]
+    message, _ = await carded(_reply(*huge))
+
+    assert message.texts == [texts.CAPTURE_TOO_LONG]
+    assert capture._drafts == {}
+
+
+@pytest.mark.asyncio
+async def test_long_confirmation_is_trimmed_not_dropped(
+    session, family, anya, bot, monkeypatch
+):
+    """Записи уже в базе — подрезать можно только эхо, и молчать нельзя.
+
+    Отказ Telegram по длине оставил бы человека с «часиком» над сохранёнными
+    записями, и он нажал бы «Сохранить» ещё раз.
+    """
+    monkeypatch.setattr(texts, "MESSAGE_LIMIT", 300)
+    items = [
+        parsing.Item(kind="task", title=f"дело {i}", confidence=0.9) for i in range(10)
+    ]
+    card = FakeCard(901, family.chat_id)
+    capture._drafts[(family.chat_id, 901)] = capture.Draft(family.id, items, 500)
+
+    await _tap("save", card, session, family, anya, bot)
+
+    assert len(await _entries(session, family)) == 10  # сохранены все
+    assert len(card.edits[0]) <= 300
+    assert "…и ещё" in card.edits[0]
 
 
 # --- отказы -------------------------------------------------------------------

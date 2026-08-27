@@ -18,7 +18,7 @@ structured outputs не поддерживает и держит схему «н
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 KINDS = ("task", "note", "event", "shopping")
 INTENTS = ("create", "query", "complete", "chitchat")
@@ -30,6 +30,13 @@ BODY_LIMIT = 1000
 RRULE_LIMIT = 255  # столько же, сколько в reminders.rrule
 MAX_ITEMS = 10  # одна фраза столько записей не даёт — это защита от зациклившейся модели
 MAX_REMINDERS = 5
+
+# Границы осмысленной даты. За ними лежит не план семьи, а мусор модели —
+# `0001-01-01` она охотно отдаёт вместо «даты нет». И это не только бессмыслица:
+# перевод такой даты в UTC даёт `OverflowError`, то есть падение хендлера ещё
+# до показа карточки
+MIN_YEAR = 2000
+MAX_YEAR = 2100
 
 # Порог, ниже которого разбор помечается в карточке как сомнительный.
 # Модель ставит 0.9+, когда дата и тип названы прямо, и заметно меньше на
@@ -198,6 +205,8 @@ def _dt(value: object) -> datetime | None:
         parsed = datetime.fromisoformat(value.strip())
     except ValueError:
         return None
+    if not MIN_YEAR <= parsed.year <= MAX_YEAR:
+        return None
     # Просили местное время без смещения. Если смещение всё же пришло, доверять
     # ему нельзя — неизвестно, из какой зоны модель его взяла. Берём то, что
     # написано на часах: дальше хендлер всё равно переведёт в UTC по зоне семьи
@@ -205,7 +214,20 @@ def _dt(value: object) -> datetime | None:
 
 
 def _date_only(value: object) -> bool:
-    return isinstance(value, str) and "T" not in value.strip().upper()
+    """Дата без времени вообще.
+
+    Проверять отсутствие `T` нельзя: ISO допускает и пробел-разделитель, а
+    `datetime.fromisoformat` его принимает — «2026-08-28 19:00» тогда молча
+    становилось бы записью на весь день, и названное время пропадало.
+    `date.fromisoformat` строг: он принимает только чистую дату.
+    """
+    if not isinstance(value, str):
+        return False
+    try:
+        date.fromisoformat(value.strip())
+    except ValueError:
+        return False
+    return True
 
 
 def _reminders(value: object) -> tuple[datetime, ...]:
@@ -225,8 +247,12 @@ def _rrule(value: object) -> str | None:
         return None
     cleaned = value.strip()
     # `FREQ=` — минимальный признак настоящего RRULE. Без него `dateutil`
-    # откажет всё равно, но уже в тикере, где отказ увидит только лог
-    return cleaned[:RRULE_LIMIT] if "FREQ=" in cleaned.upper() else None
+    # откажет всё равно, но уже в тикере, где отказ увидит только лог.
+    # Слишком длинное правило отвергается, а не обрезается: обрезка может дать
+    # синтаксически верное правило с другим смыслом — тихую подмену серии
+    if "FREQ=" not in cleaned.upper() or len(cleaned) > RRULE_LIMIT:
+        return None
+    return cleaned
 
 
 def _confidence(value: object) -> float:

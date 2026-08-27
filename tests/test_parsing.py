@@ -162,6 +162,31 @@ def test_broken_due_at_becomes_none(bad):
     assert item.all_day is False
 
 
+@pytest.mark.parametrize(
+    "outside", ["0001-01-01T00:00:00", "1999-12-31T23:59:59", "9999-12-31T23:59:59"]
+)
+def test_date_outside_sane_years_is_refused(outside):
+    """`0001-01-01` модель отдаёт вместо «даты нет», и это не просто бессмыслица.
+
+    Перевод такой даты в UTC даёт `OverflowError` — то есть падение хендлера
+    ещё до того, как человек увидит карточку.
+    """
+    assert _one(due_at=outside).due_at is None
+
+
+def test_refused_date_does_not_crash_the_card():
+    from bot import texts
+
+    _, items = normalize(
+        {"intent": "create", "items": [{"title": "X", "due_at": "0001-01-01T00:00:00"}]}
+    )
+    assert "X" in texts.capture_card(items, "Europe/Moscow")
+
+
+def test_reminder_outside_sane_years_is_refused():
+    assert _one(reminders=[{"at": "0001-01-01T00:00:00"}]).reminders == ()
+
+
 def test_offset_is_dropped_not_converted():
     """Просили местное время. Пришло со смещением — доверять ему нельзя.
 
@@ -177,6 +202,17 @@ def test_date_without_time_is_all_day_even_without_the_flag():
     item = _one(due_at="2026-08-28", all_day=False)
     assert item.due_at == datetime(2026, 8, 28)
     assert item.all_day is True
+
+
+def test_space_separator_is_not_mistaken_for_a_date_without_time():
+    """ISO допускает пробел вместо `T`, и `fromisoformat` его принимает.
+
+    По признаку «нет буквы T» такая строка становилась бы записью на весь день,
+    и названное время молча пропадало.
+    """
+    item = _one(due_at="2026-08-28 19:00:00")
+    assert item.due_at == datetime(2026, 8, 28, 19)
+    assert item.all_day is False
 
 
 def test_all_day_flag_is_respected():
@@ -215,6 +251,13 @@ def test_rrule_is_kept_when_it_looks_like_one():
 def test_rrule_without_freq_is_refused(bad):
     """Без `FREQ=` `dateutil` откажет всё равно — но уже в тикере, молча."""
     assert _one(rrule=bad).rrule is None
+
+
+def test_overlong_rrule_is_refused_not_truncated():
+    """Обрезка может дать верное правило с другим смыслом — подмену серии."""
+    long_rule = "FREQ=WEEKLY;" + "BYDAY=TU," * 100
+    assert len(long_rule) > parsing.RRULE_LIMIT
+    assert _one(rrule=long_rule).rrule is None
 
 
 @pytest.mark.parametrize(
