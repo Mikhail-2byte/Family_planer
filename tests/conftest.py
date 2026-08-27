@@ -6,14 +6,24 @@ from bot.db.models import Base
 
 
 @pytest_asyncio.fixture
-async def session():
+async def session_maker():
+    """Фабрика сессий на общей БД в памяти.
+
+    Движок для `:memory:` держит StaticPool — одно соединение на всех, поэтому
+    разные сессии видят одни и те же данные. Это нужно там, где сессию открывает
+    не тест, а сам код (например, `FamilyMiddleware`).
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    maker = async_sessionmaker(engine, expire_on_commit=False)
-    async with maker() as s:
-        yield s
+    yield async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def session(session_maker):
+    async with session_maker() as s:
+        yield s
 
 
 @pytest_asyncio.fixture

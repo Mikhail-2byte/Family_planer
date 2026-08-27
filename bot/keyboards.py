@@ -45,14 +45,16 @@ def entry_list_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
 
     if view == "tasks" and entries:
+        # Кнопок ровно столько же, сколько пронумерованных строк в тексте:
+        # рассинхрон номеров молча уводит «Готово» не на ту запись
         rows.append(
             [
                 InlineKeyboardButton(
                     text=f"✅ {i}",
                     callback_data=DoneCB(entry_id=e.id, offset=offset).pack(),
                 )
-                for i, e in enumerate(entries, start=1)
-            ][:8]
+                for i, e in enumerate(entries[:page_size], start=1)
+            ]
         )
 
     nav = []

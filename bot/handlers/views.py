@@ -1,6 +1,6 @@
 """Просмотр записей: /today /week /tasks /notes /find /family."""
 
-from datetime import timedelta
+from datetime import date, timedelta
 from itertools import groupby
 
 from aiogram import F, Router
@@ -20,6 +20,25 @@ router.message.filter(IN_GROUP)
 router.callback_query.filter(IN_GROUP_CB)
 
 PAGE_SIZE = 8
+
+
+def _by_day(entries: list[Entry], tz: str) -> list[tuple[date, list[Entry]]]:
+    """Записи → дни по возрастанию, внутри дня порядок из запроса сохранён.
+
+    Выборка приходит отсортированной как «сначала все записи на весь день,
+    потом остальные по времени», а `groupby` склеивает только соседние элементы.
+    Без пересортировки по дню неделя выводится вперемешку и один и тот же день
+    попадает в вывод дважды. `sorted` стабильна, поэтому внутридневной порядок
+    не портится.
+    """
+
+    def local_day(entry: Entry) -> date:
+        return tu.to_local(entry.due_at, tz).date()
+
+    return [
+        (day, list(group))
+        for day, group in groupby(sorted(entries, key=local_day), key=local_day)
+    ]
 
 
 @router.message(Command("today"))
@@ -63,20 +82,8 @@ async def cmd_week(message: Message, session: AsyncSession, family: Family) -> N
         await message.answer(texts.EMPTY_WEEK)
         return
 
-    monday = today - timedelta(days=today.weekday())
-    header = texts.HEADER_WEEK.format(
-        start=f"{monday.day} {tu.MONTHS_SHORT[monday.month - 1]}",
-        end=(
-            f"{(monday + timedelta(days=6)).day} "
-            f"{tu.MONTHS_SHORT[(monday + timedelta(days=6)).month - 1]}"
-        ),
-    )
-
-    def local_day(entry: Entry):
-        return tu.to_local(entry.due_at, family.tz).date()
-
-    blocks = [header]
-    for day, group in groupby(entries, key=local_day):
+    blocks = [texts.week_header(today - timedelta(days=today.weekday()))]
+    for day, group in _by_day(entries, family.tz):
         lines = "\n".join(
             texts.entry_line(e, family.tz, now, show_date=False) for e in group
         )
@@ -93,6 +100,15 @@ async def _render_page(
     entries, total = await repo.entries_by_kind(
         session, family.id, kind, status=status, limit=PAGE_SIZE, offset=offset
     )
+
+    if not entries and total:
+        # Закрыли последнюю запись на последней странице: сама страница исчезла,
+        # но записи остались. Без этого пользователь упирается в «задач нет»
+        # вообще без кнопок и не может вернуться назад
+        offset = ((total - 1) // PAGE_SIZE) * PAGE_SIZE
+        entries, total = await repo.entries_by_kind(
+            session, family.id, kind, status=status, limit=PAGE_SIZE, offset=offset
+        )
 
     if not entries:
         empty = texts.EMPTY_TASKS if view == "tasks" else texts.EMPTY_NOTES
@@ -169,13 +185,24 @@ async def cmd_find(
 
     found = await repo.search_entries(session, family.id, query)
     if not found:
-        await message.answer(texts.EMPTY_SEARCH.format(query=query))
+        await message.answer(texts.search_empty(query))
         return
 
     now = tu.now_utc()
-    lines = "\n".join(texts.entry_line(e, family.tz, now) for e in found)
-    header = texts.HEADER_SEARCH.format(query=query, count=len(found))
-    await message.answer(f"{header}\n{lines}")
+    blocks = [
+        texts.search_header(query, len(found)),
+        "\n".join(texts.entry_line(e, family.tz, now) for e in found),
+    ]
+    if len(found) == repo.SEARCH_LIMIT:
+        # Иначе заголовок «Найдено: 20» выглядит как точное число совпадений
+        blocks.append(texts.SEARCH_TRUNCATED.format(limit=repo.SEARCH_LIMIT))
+    await message.answer("\n".join(blocks))
+
+
+@router.message(F.text == kb.BTN_BUY)
+async def buy_not_ready(message: Message) -> None:
+    """Кнопка стоит на клавиатуре с этапа 1, а списки будут на этапе 4."""
+    await message.answer(texts.SOON_SHOPPING)
 
 
 @router.message(Command("family"))
@@ -183,12 +210,9 @@ async def cmd_family(message: Message, session: AsyncSession, family: Family) ->
     members = await repo.members_of(session, family.id)
     counts = await repo.entry_counts_by_author(session, family.id)
     lines = [
-        texts.FAMILY_HEADER.format(
-            title=family.title or "Семья", tz=family.tz, digest=family.digest_time
-        )
+        texts.family_header(family.title or "Семья", family.tz, family.digest_time)
     ]
     lines += [
-        texts.FAMILY_MEMBER.format(name=m.display_name, count=counts.get(m.id, 0))
-        for m in members
+        texts.family_member(m.display_name, counts.get(m.id, 0)) for m in members
     ]
     await message.answer("\n".join(lines), reply_markup=kb.main_keyboard())

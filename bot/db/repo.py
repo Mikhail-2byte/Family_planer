@@ -167,17 +167,31 @@ async def entries_by_kind(
     return list(result), int(total or 0)
 
 
+SEARCH_LIMIT = 20
+
+
+def _like_pattern(query: str) -> str:
+    """`%` и `_` в запросе человека — обычные символы, а не подстановки.
+    Без экранирования `/find %` находит вообще всё."""
+    escaped = query.strip().lower()
+    for char in ("\\", "%", "_"):
+        escaped = escaped.replace(char, f"\\{char}")
+    return f"%{escaped}%"
+
+
 async def search_entries(
-    session: AsyncSession, family_id: int, query: str, limit: int = 20
+    session: AsyncSession, family_id: int, query: str, limit: int = SEARCH_LIMIT
 ) -> list[Entry]:
     """Поиск по заголовку и телу, без учёта регистра."""
-    pattern = f"%{query.strip().lower()}%"
+    pattern = _like_pattern(query)
     result = await session.scalars(
         select(Entry)
         .where(
             Entry.family_id == family_id,
-            func.lower_unicode(Entry.title).like(pattern)
-            | func.lower_unicode(func.coalesce(Entry.body, "")).like(pattern),
+            func.lower_unicode(Entry.title).like(pattern, escape="\\")
+            | func.lower_unicode(func.coalesce(Entry.body, "")).like(
+                pattern, escape="\\"
+            ),
         )
         .order_by(Entry.created_at.desc())
         .limit(limit)

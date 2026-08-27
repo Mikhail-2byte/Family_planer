@@ -63,6 +63,11 @@ def week_bounds(day: date, tz_name: str) -> tuple[datetime, datetime]:
     return start, end
 
 
+def day_stamp(day: date) -> str:
+    """'27 авг' — короткая дата без года и без слов «завтра»/«вчера»."""
+    return f"{day.day} {MONTHS_SHORT[day.month - 1]}"
+
+
 def day_label(target: date, today: date) -> str | None:
     """Человеческое имя дня или None, если такого нет."""
     delta = (target - today).days
@@ -77,7 +82,7 @@ def day_label(target: date, today: date) -> str | None:
 
 def _date_part(target: date, today: date, *, with_label: bool = True) -> str:
     """'завтра, 27 авг' / 'пт, 29 авг' / '3 мар 2027'."""
-    stamp = f"{target.day} {MONTHS_SHORT[target.month - 1]}"
+    stamp = day_stamp(target)
     if target.year != today.year:
         stamp += f" {target.year}"
 

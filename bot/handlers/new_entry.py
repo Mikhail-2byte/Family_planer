@@ -49,6 +49,8 @@ def _rows(*rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     )
 
 
+CANCEL_KB = _rows([("❌ Отмена", CANCEL)])
+
 KIND_KB = _rows(
     [("✅ Задача", "new:kind:task"), ("📝 Заметка", "new:kind:note")],
     [("📅 Событие", "new:kind:event"), ("🛒 Покупка", "new:kind:shopping")],
@@ -81,6 +83,7 @@ ASK_TIME = "Во сколько?"
 ASK_TIME_MANUAL = "Введите время: <code>19:30</code>"
 ASK_REMIND = "Напомнить заранее?"
 CANCELLED = "Отменено."
+NOT_YOURS = "Это чужая запись — нажмите /new, чтобы начать свою."
 BAD_DATE = "Не понял дату. Нужен формат <code>27.08</code> или <code>27.08.2026</code>."
 BAD_TIME = "Не понял время. Нужен формат <code>19:30</code>."
 
@@ -93,7 +96,15 @@ async def start_wizard(message: Message, state: FSMContext) -> None:
     await message.answer(ASK_KIND, reply_markup=KIND_KB)
 
 
-@router.callback_query(F.data == CANCEL)
+# Зарегистрирован до шагов мастера, иначе `/cancel` на шаге «текст» уедет в
+# заголовок записи. Цена — записать заметку со словом «/cancel» нельзя
+@router.message(Command("cancel"), StateFilter(New))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(CANCELLED)
+
+
+@router.callback_query(StateFilter(New), F.data == CANCEL)
 async def cancel(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await call.message.edit_text(CANCELLED)
@@ -104,7 +115,7 @@ async def cancel(call: CallbackQuery, state: FSMContext) -> None:
 async def pick_kind(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(kind=call.data.split(":")[-1])
     await state.set_state(New.title)
-    await call.message.edit_text(ASK_TITLE)
+    await call.message.edit_text(ASK_TITLE, reply_markup=CANCEL_KB)
     await call.answer()
 
 
@@ -122,7 +133,7 @@ async def pick_day(
 ) -> None:
     choice = call.data.split(":")[-1]
     if choice == "other":
-        await call.message.edit_text(ASK_DAY_MANUAL)
+        await call.message.edit_text(ASK_DAY_MANUAL, reply_markup=CANCEL_KB)
         await call.answer()
         return
     if choice == "none":
@@ -156,7 +167,7 @@ async def pick_time(
 ) -> None:
     choice = call.data.removeprefix("new:at:")
     if choice == "other":
-        await call.message.edit_text(ASK_TIME_MANUAL)
+        await call.message.edit_text(ASK_TIME_MANUAL, reply_markup=CANCEL_KB)
         await call.answer()
         return
     if choice == "allday":
@@ -200,7 +211,18 @@ async def pick_remind(
 @router.message(StateFilter(New), F.text)
 async def unexpected_text(message: Message) -> None:
     """Пока идёт мастер, обычные реплики не должны молча теряться."""
-    await message.answer("Сейчас идёт запись через /new — выберите вариант кнопкой.")
+    await message.answer(
+        "Сейчас идёт запись через /new — выберите вариант кнопкой "
+        "или наберите /cancel."
+    )
+
+
+# Ниже всех обработчиков мастера: сюда попадают только тапы, которые не подошли
+# ни одному состоянию — чужая карточка или карточка, оставшаяся от прошлой
+# сессии. Без ответа у нажавшего до таймаута крутится «часик»
+@router.callback_query(F.data.startswith("new:"))
+async def stale_tap(call: CallbackQuery) -> None:
+    await call.answer(NOT_YOURS, show_alert=True)
 
 
 def _parse_day(raw: str, today):
@@ -212,10 +234,11 @@ def _parse_day(raw: str, today):
         if len(parts) > 2 and year < 100:
             year += 2000
         parsed = datetime(year, month, day).date()
+        if len(parts) == 2 and parsed < today:
+            # 29.02 в високосном году переносится в невисокосный — это ValueError
+            parsed = parsed.replace(year=year + 1)
     except (ValueError, IndexError):
         return None
-    if len(parts) == 2 and parsed < today:
-        parsed = parsed.replace(year=year + 1)
     return parsed
 
 

@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
-from aiogram.types import Chat, Message, TelegramObject, User
+from aiogram.types import Chat, Message, TelegramObject, Update, User
 
 from bot.db import repo
 from bot.db.session import Session
@@ -24,6 +24,14 @@ GROUP_CHATS = {"group", "supergroup"}
 
 def _display_name(user: User) -> str:
     return user.full_name or user.username or str(user.id)
+
+
+def _message_of(event: TelegramObject) -> Message | None:
+    """Middleware висит на `dp.update`, поэтому сюда приходит `Update`, а не
+    `Message`. Служебные поля миграции лежат внутри вложенного сообщения."""
+    if isinstance(event, Update):
+        return event.message
+    return event if isinstance(event, Message) else None
 
 
 class FamilyMiddleware(BaseMiddleware):
@@ -44,7 +52,7 @@ class FamilyMiddleware(BaseMiddleware):
             if chat is None or chat.type not in GROUP_CHATS:
                 return await handler(event, data)
 
-            if await self._handle_migration(session, event, chat):
+            if await self._handle_migration(session, _message_of(event), chat):
                 # Чат уехал в супергруппу — под старым chat_id семью не заводим
                 return None
 
@@ -59,15 +67,15 @@ class FamilyMiddleware(BaseMiddleware):
             return await handler(event, data)
 
     @staticmethod
-    async def _handle_migration(session, event: TelegramObject, chat: Chat) -> bool:
+    async def _handle_migration(session, message: Message | None, chat: Chat) -> bool:
         """Возвращает True, если чат перестал существовать под текущим chat_id."""
-        if not isinstance(event, Message):
+        if message is None:
             return False
-        if event.migrate_to_chat_id:
-            await repo.migrate_family_chat_id(session, chat.id, event.migrate_to_chat_id)
-            log.info("Семья переехала: %s → %s", chat.id, event.migrate_to_chat_id)
+        if message.migrate_to_chat_id:
+            await repo.migrate_family_chat_id(session, chat.id, message.migrate_to_chat_id)
+            log.info("Семья переехала: %s → %s", chat.id, message.migrate_to_chat_id)
             return True
-        if event.migrate_from_chat_id:
-            await repo.migrate_family_chat_id(session, event.migrate_from_chat_id, chat.id)
-            log.info("Семья переехала: %s → %s", event.migrate_from_chat_id, chat.id)
+        if message.migrate_from_chat_id:
+            await repo.migrate_family_chat_id(session, message.migrate_from_chat_id, chat.id)
+            log.info("Семья переехала: %s → %s", message.migrate_from_chat_id, chat.id)
         return False

@@ -5,7 +5,7 @@
 угадывать род по имени значит регулярно ошибаться.
 """
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from aiogram.utils.text_decorations import html_decoration as fmt
 
@@ -35,6 +35,8 @@ KIND_NAMES = {
     "shopping": "Покупка",
 }
 
+SOON_SHOPPING = "Покупки ещё не готовы — они появятся на этапе 4."
+
 EMPTY_TODAY = "На сегодня ничего не запланировано."
 EMPTY_WEEK = "На этой неделе ничего не запланировано."
 EMPTY_TASKS = "Открытых задач нет."
@@ -42,12 +44,12 @@ EMPTY_NOTES = "Заметок пока нет."
 EMPTY_SEARCH = "По запросу «{query}» ничего не нашлось."
 FIND_USAGE = "Как искать: <code>/find молоко</code>"
 
-HEADER_TODAY = "📅 <b>Сегодня, {date}</b>"
 HEADER_WEEK = "📅 <b>Неделя {start} — {end}</b>"
 HEADER_TASKS = "✅ <b>Задачи</b> ({shown} из {total})"
 HEADER_NOTES = "📝 <b>Заметки</b> ({shown} из {total})"
 HEADER_SEARCH = "🔎 <b>Найдено по «{query}»:</b> {count}"
 HEADER_OVERDUE = "⚠️ <b>Просрочено</b>"
+SEARCH_TRUNCATED = "Показаны первые {limit} — уточните запрос."
 
 DONE_CONFIRMED = "Готово: {title}"
 DONE_ALREADY = "Эта запись уже закрыта."
@@ -59,6 +61,32 @@ FAMILY_MEMBER = "• {name} — записей: {count}"
 
 def _escape(value: str) -> str:
     return fmt.quote(value)
+
+
+# Ниже — подстановки, куда попадает текст, введённый человеком: поисковый
+# запрос, имя участника, название чата. `parse_mode="HTML"` включён глобально,
+# поэтому без экранирования Telegram отвечает «can't parse entities», и
+# сообщение не уходит вообще.
+
+
+def pong(title: str, members: int) -> str:
+    return PONG.format(title=_escape(title), members=members)
+
+
+def search_header(query: str, count: int) -> str:
+    return HEADER_SEARCH.format(query=_escape(query), count=count)
+
+
+def search_empty(query: str) -> str:
+    return EMPTY_SEARCH.format(query=_escape(query))
+
+
+def family_header(title: str, tz: str, digest: str) -> str:
+    return FAMILY_HEADER.format(title=_escape(title), tz=tz, digest=digest)
+
+
+def family_member(name: str, count: int) -> str:
+    return FAMILY_MEMBER.format(name=_escape(name), count=count)
 
 
 def _author_suffix(entry: Entry, tz: str, now: datetime | None = None) -> str:
@@ -107,6 +135,13 @@ def entry_card(entry: Entry, tz: str, now: datetime | None = None) -> str:
 def day_header(day, tz: str, now: datetime | None = None) -> str:
     today = tu.local_today(tz, now)
     label = tu.day_label(day, today)
-    stamp = f"{day.day} {tu.MONTHS_SHORT[day.month - 1]}"
+    stamp = tu.day_stamp(day)
     weekday = tu.WEEKDAYS_SHORT[day.weekday()]
     return fmt.bold(f"{label}, {stamp}" if label else f"{weekday}, {stamp}")
+
+
+def week_header(monday: date) -> str:
+    """Заголовок `/week`. Диапазон считается здесь, а не в хендлере."""
+    return HEADER_WEEK.format(
+        start=tu.day_stamp(monday), end=tu.day_stamp(monday + timedelta(days=6))
+    )
