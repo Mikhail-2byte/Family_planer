@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import suppress
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +8,25 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bot.db import repo
 from bot.db.models import Base
+from bot.services import panel
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _panel_state():
+    """Панель держит состояние в модульных словарях — между тестами оно течёт.
+
+    Без уборки один тест видит лок и незавершённый дебаунс другого, а
+    оставшаяся задача печатает «Task was destroyed but it is pending».
+    """
+    yield
+    tasks = list(panel._tasks.values())
+    panel._tasks.clear()
+    panel._locks.clear()
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 @pytest_asyncio.fixture
@@ -46,13 +67,22 @@ class FakeBot:
     """Заглушка вместо `Bot`: складывает отправленное в список.
 
     Настоящий `Bot` в тестах не создаётся никогда — сети в тестах нет.
-    `fail_on` позволяет проверить, что сбой одной отправки не срывает остальные.
+    `fail_on` / `fail_on_edit` позволяют проверить, что сбой одной отправки или
+    правки не срывает остальные; ключ — порядковый номер вызова.
     """
 
-    def __init__(self, fail_on=None):
+    def __init__(self, fail_on=None, fail_on_edit=None, fail_on_pin=None):
         self.sent: list[tuple[int, str]] = []
         self.kwargs: list[dict] = []  # чем сопровождалась отправка (reply_markup)
+        self.edited: list[tuple[int, int, str]] = []  # chat_id, message_id, текст
+        self.pinned: list[int] = []
+        self.unpinned: list[int] = []
         self._fail_on = fail_on or {}
+        self._fail_on_edit = fail_on_edit or {}
+        self._fail_on_pin = fail_on_pin or {}
+        # message_id последовательны, как в настоящем чате: на этом держится
+        # подсчёт «на сколько сообщений уехала панель»
+        self._next_id = 100
 
     async def send_message(self, chat_id: int, text: str, **kwargs):
         error = self._fail_on.get(len(self.sent))
@@ -60,6 +90,26 @@ class FakeBot:
         self.kwargs.append(kwargs)
         if error is not None:
             raise error
+        self._next_id += 1
+        # Раньше здесь был None: `sending.send` берёт отсюда message_id
+        return SimpleNamespace(message_id=self._next_id)
+
+    async def edit_message_text(self, text: str, chat_id=None, message_id=None, **kwargs):
+        error = self._fail_on_edit.get(len(self.edited))
+        self.edited.append((chat_id, message_id, text))
+        if error is not None:
+            raise error
+        return None
+
+    async def pin_chat_message(self, chat_id: int, message_id: int, **kwargs):
+        error = self._fail_on_pin.get(len(self.pinned))
+        self.pinned.append(message_id)
+        if error is not None:
+            raise error
+        return None
+
+    async def unpin_chat_message(self, chat_id: int, message_id=None, **kwargs):
+        self.unpinned.append(message_id)
         return None
 
     @property

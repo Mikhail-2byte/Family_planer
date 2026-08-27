@@ -6,7 +6,7 @@
 
 from datetime import datetime, time, timedelta
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -23,6 +23,7 @@ from bot import texts
 from bot.db import repo
 from bot.db.models import Family, Member
 from bot.filters import IN_GROUP, IN_GROUP_CB
+from bot.services import panel
 from bot.services import timeutil as tu
 
 router = Router()
@@ -149,7 +150,7 @@ async def take_title(message: Message, state: FSMContext) -> None:
 @router.callback_query(New.day, F.data.startswith("new:day:"))
 async def pick_day(
     call: CallbackQuery, state: FSMContext, session: AsyncSession, family: Family,
-    member: Member,
+    member: Member, bot: Bot,
 ) -> None:
     choice = call.data.split(":")[-1]
     if choice == "other":
@@ -159,6 +160,7 @@ async def pick_day(
     if choice == "none":
         await call.message.delete()
         await _save(call.message, state, session, family, member)
+        panel.schedule(bot, family.id, call.message.message_id)
         await call.answer()
         return
 
@@ -220,13 +222,15 @@ async def take_time(message: Message, state: FSMContext) -> None:
 @router.callback_query(New.remind, F.data.startswith("new:rem:"))
 async def pick_remind(
     call: CallbackQuery, state: FSMContext, session: AsyncSession, family: Family,
-    member: Member,
+    member: Member, bot: Bot,
 ) -> None:
     choice = call.data.split(":")[-1]
     if choice != "none":
         await state.update_data(remind_before=int(choice))
     await call.message.delete()
     await _save(call.message, state, session, family, member)
+    # Не внутри `_save`: у него нет `bot`, а тесты зовут его напрямую
+    panel.schedule(bot, family.id, call.message.message_id)
     await call.answer()
 
 

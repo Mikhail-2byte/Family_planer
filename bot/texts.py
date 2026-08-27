@@ -257,3 +257,23 @@ def remind_saved(text: str, fire_at: datetime, tz: str, now: datetime | None = N
 
 def remind_in_past(fire_at: datetime, tz: str, now: datetime | None = None) -> str:
     return REMIND_PAST.format(when=tu.fmt_due(fire_at, tz, now=now))
+
+
+# --- Этап 2п: живая панель дня ----------------------------------------------
+
+PANEL_HEADER = "📌 <b>Сегодня</b>"
+PANEL_FOOTER = "<i>Это сообщение обновляется само — отвечать на него не нужно.</i>"
+
+
+def panel(body: str) -> str:
+    """Обвязка панели вокруг тела дня.
+
+    `body` собирает `digest.build_day` — там всё уже прошло через `_escape`,
+    второй раз экранировать нельзя.
+
+    Ничего изменчивого — времени последнего обновления, счётчиков — сюда
+    добавлять нельзя: текст обязан совпадать сам с собой, иначе Telegram
+    перестанет отвечать «message is not modified», и каждая холостая
+    перерисовка станет настоящей правкой и потратит лимит чата.
+    """
+    return f"{PANEL_HEADER}\n\n{body}\n\n{PANEL_FOOTER}"

@@ -320,6 +320,22 @@ async def set_last_digest_on(
     await session.commit()
 
 
+async def set_panel(
+    session: AsyncSession,
+    family: Family,
+    message_id: int | None,
+    day: date | None,
+) -> None:
+    """Панель и её день меняются только вместе.
+
+    Порознь перевыпуск теряет след: id без дня не даст понять, что панель
+    осталась за вчера, а день без id — что редактировать.
+    """
+    family.panel_message_id = message_id
+    family.panel_day = day
+    await session.commit()
+
+
 async def migrate_family_chat_id(
     session: AsyncSession, old_chat_id: int, new_chat_id: int
 ) -> bool:
@@ -332,7 +348,7 @@ async def migrate_family_chat_id(
     result = await session.execute(
         update(Family)
         .where(Family.chat_id == old_chat_id)
-        .values(chat_id=new_chat_id, panel_message_id=None)
+        .values(chat_id=new_chat_id, panel_message_id=None, panel_day=None)
     )
     await session.commit()
     return bool(result.rowcount)

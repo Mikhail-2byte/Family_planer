@@ -13,7 +13,7 @@ from bot.config import settings
 from bot.db.session import engine
 from bot.handlers import routers
 from bot.middlewares import FamilyMiddleware
-from bot.services import ticker
+from bot.services import panel, ticker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,7 +79,12 @@ async def main() -> None:
         # Порядок обязателен: сначала перестаём порождать отправки, потом
         # закрываем сеть, последним — движок БД. Каждый шаг в своём try,
         # чтобы падение одного не съело остальные
-        for step in (_stop_ticker(task), bot.session.close(), engine.dispose()):
+        for step in (
+            _stop_ticker(task),
+            panel.shutdown(),
+            bot.session.close(),
+            engine.dispose(),
+        ):
             try:
                 await step
             except Exception:

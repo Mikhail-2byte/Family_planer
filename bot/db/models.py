@@ -39,6 +39,9 @@ class Family(Base):
     # 'all'     — гнать каждое сообщение в LLM на триаж
     listen_mode: Mapped[str] = mapped_column(String(16), default="trigger")
     panel_message_id: Mapped[int | None] = mapped_column(Integer)
+    # Локальный день, за который выпущена панель. Именно день, а не момент:
+    # сравнение идёт с `local_today`, ровно как у `last_digest_on`
+    panel_day: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

@@ -61,6 +61,7 @@ class FakeState:
 class FakeMessage:
     def __init__(self, chat_id=-1001):
         self.chat = type("Chat", (), {"id": chat_id})()
+        self.message_id = 1  # по нему панель считает, далеко ли уехала
         self.replies: list[str] = []
 
     async def answer(self, text, **kwargs):
@@ -181,7 +182,7 @@ def _fsm() -> FSMContext:
 
 
 @pytest.mark.asyncio
-async def test_wizard_goes_from_buttons_to_a_saved_entry(session, family, anya):
+async def test_wizard_goes_from_buttons_to_a_saved_entry(session, family, anya, bot):
     """Критерий 1.10: запись создаётся кнопками от начала до конца."""
     state = _fsm()
     card = WizardMessage()
@@ -194,7 +195,7 @@ async def test_wizard_goes_from_buttons_to_a_saved_entry(session, family, anya):
     assert await state.get_state() == new_entry.New.day.state
 
     await new_entry.pick_day(
-        FakeCall("new:day:1", card), state, session, family, anya
+        FakeCall("new:day:1", card), state, session, family, anya, bot
     )
     await new_entry.pick_time(
         FakeCall("new:at:19:00", card), state, session, family, anya
@@ -202,7 +203,7 @@ async def test_wizard_goes_from_buttons_to_a_saved_entry(session, family, anya):
     assert await state.get_state() == new_entry.New.remind.state
 
     await new_entry.pick_remind(
-        FakeCall("new:rem:15", card), state, session, family, anya
+        FakeCall("new:rem:15", card), state, session, family, anya, bot
     )
 
     assert card.deleted, "карточку мастера убираем, а не оставляем висеть"

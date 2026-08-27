@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     late_silent_min: int = 10
     late_summary_hours: int = 12
 
+    # Живая панель дня (этап 2п). Дебаунс склеивает серию правок в одно
+    # редактирование; порог — после скольких сообщений панель уехала вверх
+    # настолько, что проще выпустить новую, чем править невидимую.
+    # Дебаунс дробный намеренно: тест ставит 0.01 и не ждёт секунду на прогон
+    panel_max_messages: int = 20
+    panel_debounce_seconds: float = 2.0
+
     openrouter_key: str = ""
     openrouter_model: str = ""
     openrouter_model_cheap: str = ""

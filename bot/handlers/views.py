@@ -3,7 +3,7 @@
 from datetime import date, timedelta
 from itertools import groupby
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
@@ -14,7 +14,7 @@ from bot import texts
 from bot.db import repo
 from bot.db.models import Entry, Family, Member
 from bot.filters import IN_GROUP, IN_GROUP_CB
-from bot.services import digest
+from bot.services import digest, panel
 from bot.services import timeutil as tu
 
 router = Router()
@@ -174,6 +174,7 @@ async def mark_done(
     session: AsyncSession,
     family: Family,
     member: Member,
+    bot: Bot,
 ) -> None:
     entry = await repo.complete_entry(
         session, callback_data.entry_id, family.id, member.id
@@ -183,6 +184,9 @@ async def mark_done(
         return
 
     await call.answer(texts.DONE_CONFIRMED.format(title=entry.title[:60]))
+    # Раньше перерисовки списка: запись уже закрыта в базе, и сбой рендера
+    # страницы не должен оставить панель со сделанной задачей
+    panel.schedule(bot, family.id, call.message.message_id)
     text, markup = await _render_page(session, family, "tasks", callback_data.offset)
     await edit_or_ignore(call, text, markup)
 
