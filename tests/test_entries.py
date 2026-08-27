@@ -209,6 +209,41 @@ async def test_all_day_entry_hides_time(session, family, anya):
     assert "завтра, 28 авг" in card and "00:00" not in card
 
 
+# --- ссылка на исходное сообщение, шаг 3a.7 -----------------------------------
+
+
+async def _sourced(session, family, anya, chat_id, message_id):
+    entry = await repo.create_entry(
+        session,
+        family_id=family.id,
+        author_id=anya.id,
+        kind="task",
+        title="Купить молоко",
+        source_chat_id=chat_id,
+        source_message_id=message_id,
+    )
+    await session.refresh(entry, ["author"])
+    return texts.entry_card(entry, MSK, NOW)
+
+
+@pytest.mark.asyncio
+async def test_card_links_to_the_source_message(session, family, anya):
+    card = await _sourced(session, family, anya, -1001234567890, 42)
+    assert 'href="https://t.me/c/1234567890/42"' in card
+
+
+@pytest.mark.asyncio
+async def test_plain_group_gets_no_link(session, family, anya):
+    """У обычной группы (chat_id без -100) ссылок на сообщения не бывает вовсе."""
+    assert "t.me" not in await _sourced(session, family, anya, -5001, 42)
+
+
+@pytest.mark.asyncio
+async def test_entry_without_source_message_gets_no_link(session, family, anya):
+    """Записи мастера `/new`: chat_id он пишет, а message_id — нет."""
+    assert "t.me" not in await _sourced(session, family, anya, -1001234567890, None)
+
+
 @pytest.mark.asyncio
 async def test_render_page_numbers_entries_and_builds_nav(session, family, anya):
     from bot.handlers.views import _render_page

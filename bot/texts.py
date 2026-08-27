@@ -83,6 +83,34 @@ DONE_CONFIRMED = "Готово: {title}"
 DONE_ALREADY = "Эта запись уже закрыта."
 SAVED = "Записал."
 
+# Карточка подтверждения разбора (этап 3a). Ничего не сохраняется молча —
+# инвариант PLAN.md, поэтому путь «разобрал и сразу записал» не предусмотрен
+CAPTURE_ASK = "Правильно понял?"
+CAPTURE_UNCERTAIN = (
+    "<i>В разборе не уверен — проверьте перед сохранением.</i>"
+)
+CAPTURE_CANCELLED = "Отменено, ничего не записал."
+# Черновики живут в памяти и не переживают перезапуск бота
+CAPTURE_STALE = "Эта карточка устарела — напишите фразу заново."
+CAPTURE_ALIEN = "Это карточка другого чата."
+CAPTURE_EMPTY = "Не понял, что записать. Попробуйте /new — там по шагам."
+CAPTURE_FAILED = "Не смог разобрать фразу. Попробуйте /new — там по шагам."
+# intent query и complete модель различает, но обработки у них не будет до
+# следующего этапа. Молчать нельзя: к боту обратились явно
+CAPTURE_NOT_YET = (
+    "Это я пока не умею. План — /today и /week, поиск — /find, "
+    "закрыть задачу — кнопкой в /tasks."
+)
+
+CAPTURE_RRULE_BAD = (
+    "Повтор <code>{rule}</code> я не понял — запись сохранил, "
+    "напоминание не создал."
+)
+
+REMIND_LINE = "🔔 {when}"
+RRULE_LINE = "🔁 повторяется: <code>{rule}</code>"
+SOURCE_LINK = '🔗 <a href="{url}">исходное сообщение</a>'
+
 FAMILY_HEADER = "👨‍👩‍👦 <b>{title}</b>\nТаймзона: {tz} · дайджест в {digest}"
 FAMILY_MEMBER = "• {name} — записей: {count}"
 
@@ -115,6 +143,11 @@ def family_header(title: str, tz: str, digest: str) -> str:
 
 def family_member(name: str, count: int) -> str:
     return FAMILY_MEMBER.format(name=_escape(name), count=count)
+
+
+def capture_rrule_bad(rule: str) -> str:
+    """Правило приходит от модели, а `<` в нём ломает отправку целиком."""
+    return CAPTURE_RRULE_BAD.format(rule=_escape(rule))
 
 
 def _author_suffix(entry: Entry, tz: str, now: datetime | None = None) -> str:
@@ -168,6 +201,23 @@ def entry_lines(
     return lines
 
 
+def _source_url(entry: Entry) -> str | None:
+    """Ссылка на сообщение, из которого выросла запись, либо `None` (шаг 3a.7).
+
+    Формат `t.me/c/<id без -100>/<message_id>` существует только у супергрупп и
+    открывается только у тех, кто в чате состоит. У обычной группы ссылок на
+    сообщения нет в принципе, поэтому строки в карточке тоже не будет.
+    Записи мастера `/new` сюда не попадают: `source_message_id` он не пишет —
+    у пошагового мастера нет одного «исходного» сообщения.
+    """
+    if not entry.source_chat_id or not entry.source_message_id:
+        return None
+    chat = str(entry.source_chat_id)
+    if not chat.startswith("-100"):
+        return None
+    return f"https://t.me/c/{chat[4:]}/{entry.source_message_id}"
+
+
 def entry_card(entry: Entry, tz: str, now: datetime | None = None) -> str:
     """Развёрнутая карточка одной записи — после сохранения."""
     icon = KIND_ICONS.get(entry.kind, "•")
@@ -178,7 +228,53 @@ def entry_card(entry: Entry, tz: str, now: datetime | None = None) -> str:
     when = _when_part(entry, tz, now, show_date=True)
     if when:
         lines.append(f"📅 {when}")
+    url = _source_url(entry)
+    if url:
+        lines.append(SOURCE_LINK.format(url=url))
     lines.append(_author_suffix(entry, tz, now))
+    return "\n".join(lines)
+
+
+def capture_card(items, tz: str, now: datetime | None = None) -> str:
+    """Превью разбора до сохранения (шаг 3a.6).
+
+    Отдельно от `entry_card`, потому что тот принимает уже сохранённый `Entry`
+    с подгруженным автором, а здесь на руках только разбор — `parsing.Item`.
+
+    Времена в `Item` локальные, а `fmt_due` ждёт UTC. Прогон через `to_utc` и
+    обратно намеренный: так превью показывает ровно ту строку, какую покажет
+    потом сохранённая запись, включая пограничные случаи перевода часов.
+    """
+    blocks = [CAPTURE_ASK]
+    numbered = len(items) > 1
+    for i, item in enumerate(items, start=1):
+        head = f"{i}. " if numbered else ""
+        blocks.append(head + _item_block(item, tz, now))
+    if any(item.uncertain for item in items):
+        blocks.append(CAPTURE_UNCERTAIN)
+    return "\n\n".join(blocks)
+
+
+def _item_block(item, tz: str, now: datetime | None) -> str:
+    icon = KIND_ICONS.get(item.kind, "•")
+    name = KIND_NAMES.get(item.kind, item.kind)
+    lines = [f"{icon} <b>{name}:</b> {_escape(item.title)}"]
+    if item.body:
+        lines.append(_escape(item.body))
+    if item.due_at is not None:
+        when = tu.fmt_due(
+            tu.to_utc(item.due_at, tz), tz, all_day=item.all_day, now=now
+        )
+        lines.append(f"📅 {when}")
+    for moment in item.reminders:
+        lines.append(
+            REMIND_LINE.format(when=tu.fmt_due(tu.to_utc(moment, tz), tz, now=now))
+        )
+    if item.rrule:
+        # Правило показывается как есть: человекочитаемый рендер RRULE — работа
+        # отдельная, а карточка нужна ровно для того, чтобы повтор можно было
+        # проверить глазами до сохранения
+        lines.append(RRULE_LINE.format(rule=_escape(item.rrule)))
     return "\n".join(lines)
 
 

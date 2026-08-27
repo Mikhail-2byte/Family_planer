@@ -28,6 +28,10 @@ def main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+BTN_SAVE = "✅ Сохранить"
+BTN_CANCEL = "❌ Отмена"
+
+
 class PageCB(CallbackData, prefix="page"):
     view: str  # 'tasks' | 'notes'
     offset: int
@@ -36,6 +40,32 @@ class PageCB(CallbackData, prefix="page"):
 class DoneCB(CallbackData, prefix="done"):
     entry_id: int
     offset: int
+
+
+class CaptureCB(CallbackData, prefix="cap"):
+    action: str  # 'save' | 'cancel'
+
+
+def capture_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки под карточкой разбора.
+
+    Идентификатора черновика в `callback_data` нет намеренно: ключом служит
+    `message_id` сообщения, на котором висит кнопка, — он и так приезжает
+    вместе с колбэком. Кнопки правки (`📅 Дата`, `🔀 Тип`, `✏️ Текст`) из
+    `PLAN.md` появятся на этапе 3b.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=BTN_SAVE, callback_data=CaptureCB(action="save").pack()
+                ),
+                InlineKeyboardButton(
+                    text=BTN_CANCEL, callback_data=CaptureCB(action="cancel").pack()
+                ),
+            ]
+        ]
+    )
 
 
 def entry_list_keyboard(
