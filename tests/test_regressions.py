@@ -239,3 +239,51 @@ def test_stale_tap_handler_is_registered_last():
     handlers = [h.callback.__name__ for h in new_entry.router.callback_query.handlers]
     assert handlers[-1] == "stale_tap"
     assert "cancel" in handlers and handlers.index("cancel") < handlers.index("stale_tap")
+
+
+# --- Одна и та же страница дважды: «message is not modified» ------------------
+
+
+class _Call:
+    """CallbackQuery ровно в той части, которой пользуется `edit_or_ignore`."""
+
+    def __init__(self, error: Exception | None = None):
+        self.edits: list[str] = []
+        outer = self
+
+        class _Msg:
+            async def edit_text(self, text, **kwargs):
+                outer.edits.append(text)
+                if error is not None:
+                    raise error
+
+        self.message = _Msg()
+
+
+@pytest.mark.asyncio
+async def test_repeated_page_tap_does_not_leave_a_spinner():
+    """Двое тапнули одну кнопку — второй edit отвергнут, но хендлер жив."""
+    from aiogram.exceptions import TelegramBadRequest
+
+    from bot.handlers.views import edit_or_ignore
+
+    not_modified = TelegramBadRequest(
+        method=None,
+        message="Bad Request: message is not modified: specified new message content"
+        " and reply markup are exactly the same",
+    )
+    call = _Call(not_modified)
+    await edit_or_ignore(call, "страница", None)  # не должно бросить
+    assert call.edits == ["страница"]
+
+
+@pytest.mark.asyncio
+async def test_other_bad_requests_are_not_swallowed():
+    """Слишком длинное сообщение или сломанная разметка обязаны быть видны."""
+    from aiogram.exceptions import TelegramBadRequest
+
+    from bot.handlers.views import edit_or_ignore
+
+    call = _Call(TelegramBadRequest(method=None, message="Bad Request: message is too long"))
+    with pytest.raises(TelegramBadRequest):
+        await edit_or_ignore(call, "страница", None)

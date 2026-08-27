@@ -37,16 +37,26 @@ async def build_day(
     entries = await repo.entries_for_range(session, family.id, start, end)
     overdue = await repo.overdue_entries(session, family.id, start)
 
+    # Оба списка обрезаны по MAX_DAY_ITEMS: просрочка копится годами, и без
+    # потолка сводка однажды перерастает 4096 символов. Telegram отвечает
+    # отказом, `sending.deliver` возвращает BROKEN, а `last_digest_on` всё равно
+    # проставляется — дайджест пропал бы молча и навсегда
     blocks: list[str] = []
     if overdue:
         blocks.append(
             texts.HEADER_OVERDUE
             + "\n"
-            + "\n".join(texts.entry_line(e, family.tz, moment) for e in overdue)
+            + "\n".join(
+                texts.entry_lines(
+                    overdue, family.tz, moment, limit=texts.MAX_DAY_ITEMS
+                )
+            )
         )
 
     body = "\n".join(
-        texts.entry_line(e, family.tz, moment, show_date=False) for e in entries
+        texts.entry_lines(
+            entries, family.tz, moment, limit=texts.MAX_DAY_ITEMS, show_date=False
+        )
     )
     blocks.append(
         texts.day_header(today, family.tz, moment) + "\n" + (body or texts.EMPTY_TODAY)

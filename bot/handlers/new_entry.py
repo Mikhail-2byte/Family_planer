@@ -4,7 +4,7 @@
 записать что-то в семью всё равно можно (PLAN.md, «Разбор естественного текста»).
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 from aiogram import F, Router
 from aiogram.filters import Command, StateFilter
@@ -75,6 +75,15 @@ REMIND_KB = _rows(
     [("❌ Отмена", CANCEL)],
 )
 
+# У записи «на весь день» время — полночь, и «за 15 минут» означало бы 23:45
+# накануне. Поэтому свои варианты, а точка отсчёта — ALLDAY_ANCHOR
+ALLDAY_ANCHOR = time(9, 0)
+REMIND_ALLDAY_KB = _rows(
+    [("Утром в 09:00", "new:rem:0"), ("Накануне вечером", "new:rem:840")],
+    [("Без напоминания", "new:rem:none")],
+    [("❌ Отмена", CANCEL)],
+)
+
 ASK_KIND = "Что записываем?"
 ASK_TITLE = "Что записать? Напишите одним сообщением."
 ASK_DAY = "На какой день?"
@@ -83,8 +92,13 @@ ASK_TIME = "Во сколько?"
 ASK_TIME_MANUAL = "Введите время: <code>19:30</code>"
 ASK_REMIND = "Напомнить заранее?"
 CANCELLED = "Отменено."
+NOTHING_TO_CANCEL = "Нечего отменять — мастер /new сейчас не идёт."
 NOT_YOURS = "Это чужая запись — нажмите /new, чтобы начать свою."
-BAD_DATE = "Не понял дату. Нужен формат <code>27.08</code> или <code>27.08.2026</code>."
+BAD_DATE = (
+    "Не понял дату. Нужен формат <code>27.08</code> или <code>27.08.2026</code>.\n"
+    "Без года я беру ближайший будущий — если такой даты в нём нет (29.02), "
+    "укажите год."
+)
 BAD_TIME = "Не понял время. Нужен формат <code>19:30</code>."
 
 
@@ -102,6 +116,12 @@ async def start_wizard(message: Message, state: FSMContext) -> None:
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(CANCELLED)
+
+
+# Вне мастера отменять нечего, но молчание читается как «команда сломана»
+@router.message(Command("cancel"))
+async def cmd_cancel_idle(message: Message) -> None:
+    await message.answer(NOTHING_TO_CANCEL)
 
 
 @router.callback_query(StateFilter(New), F.data == CANCEL)
@@ -171,9 +191,11 @@ async def pick_time(
         await call.answer()
         return
     if choice == "allday":
+        # Запись «на весь день» тоже доходит до шага напоминания, просто с
+        # другими вариантами: отсчитывать «за 15 минут» от полуночи бессмысленно
         await state.update_data(all_day=True)
-        await call.message.delete()
-        await _save(call.message, state, session, family, member)
+        await state.set_state(New.remind)
+        await call.message.edit_text(ASK_REMIND, reply_markup=REMIND_ALLDAY_KB)
         await call.answer()
         return
 
@@ -253,12 +275,20 @@ async def _save(
     await state.clear()
 
     due_at = None
+    anchor = None  # от чего отсчитывается напоминание
     all_day = bool(data.get("all_day"))
     if data.get("day"):
         day = datetime.fromisoformat(data["day"]).date()
         moment = tu.parse_hhmm(data["at"]) if data.get("at") else datetime.min.time()
         all_day = all_day or not data.get("at")
         due_at = tu.to_utc(datetime.combine(day, moment), family.tz)
+        # У записи на весь день срок — полночь, и отсчитывать напоминание от неё
+        # нельзя: «утром» превратилось бы в 00:00
+        anchor = (
+            tu.to_utc(datetime.combine(day, ALLDAY_ANCHOR), family.tz)
+            if all_day
+            else due_at
+        )
 
     entry = await repo.create_entry(
         session,
@@ -272,18 +302,26 @@ async def _save(
     )
 
     before = data.get("remind_before")
-    if due_at is not None and before is not None:
-        await repo.create_reminder(
-            session,
-            family_id=family.id,
-            created_by=member.id,
-            text=entry.title,
-            fire_at=due_at - timedelta(minutes=before),
-            entry_id=entry.id,
-        )
+    warning = None
+    if anchor is not None and before is not None:
+        fire_at = anchor - timedelta(minutes=before)
+        now = tu.now_utc()
+        if fire_at <= now:
+            # Тикер честно отработал бы это догонкой и выстрелил в ближайший
+            # тик — сюрприз на пустом месте. `/remind` тот же случай отвергает
+            warning = texts.remind_in_past(fire_at, family.tz, now)
+        else:
+            await repo.create_reminder(
+                session,
+                family_id=family.id,
+                created_by=member.id,
+                text=entry.title,
+                fire_at=fire_at,
+                entry_id=entry.id,
+            )
 
     await session.refresh(entry, ["author"])
-    await message.answer(
-        f"{texts.SAVED}\n\n{texts.entry_card(entry, family.tz)}",
-        reply_markup=kb.main_keyboard(),
-    )
+    blocks = [texts.SAVED, texts.entry_card(entry, family.tz)]
+    if warning:
+        blocks.append(warning)
+    await message.answer("\n\n".join(blocks), reply_markup=kb.main_keyboard())

@@ -22,6 +22,21 @@ GREETING = (
 
 PONG = "Живой. Семья: {title}, участников: {members}."
 
+# Меню команд в поле ввода. Кнопок на клавиатуре пять, а команд десять —
+# без этого списка про `/week`, `/find`, `/family` и `/cancel` узнать неоткуда
+COMMANDS = [
+    ("new", "Записать что-нибудь"),
+    ("today", "План на сегодня"),
+    ("week", "План на неделю"),
+    ("tasks", "Открытые задачи"),
+    ("notes", "Заметки"),
+    ("find", "Поиск: /find молоко"),
+    ("remind", "Напомнить: /remind завтра в 19:00 позвонить маме"),
+    ("family", "Кто в семье и сколько записал"),
+    ("cancel", "Прервать мастер /new"),
+    ("ping", "Проверить, жив ли бот"),
+]
+
 PRIVATE_CHAT = (
     "Я работаю в общем семейном чате, а не в личке. "
     "Добавьте меня в группу «Семья»."
@@ -36,6 +51,7 @@ KIND_NAMES = {
 }
 
 SOON_SHOPPING = "Покупки ещё не готовы — они появятся на этапе 4."
+WIZARD_DROPPED = "Запись через /new прервана — начните заново, если она нужна."
 
 EMPTY_TODAY = "На сегодня ничего не запланировано."
 EMPTY_WEEK = "На этой неделе ничего не запланировано."
@@ -50,6 +66,18 @@ HEADER_NOTES = "📝 <b>Заметки</b> ({shown} из {total})"
 HEADER_SEARCH = "🔎 <b>Найдено по «{query}»:</b> {count}"
 HEADER_OVERDUE = "⚠️ <b>Просрочено</b>"
 SEARCH_TRUNCATED = "Показаны первые {limit} — уточните запрос."
+
+MORE_ITEMS = "…и ещё {count}"
+# Сообщение уходит одним куском, а у Telegram лимит 4096 символов. Любой
+# список, который человек может наращивать бесконечно, обязан иметь потолок:
+# просрочка копится годами, пропущенные — за время простоя ПК.
+MAX_SUMMARY_ITEMS = 10
+MAX_DAY_ITEMS = 15
+# У недели потолок свой и общий на все семь дней: семь дней по MAX_DAY_ITEMS
+# перерастают 4096 символов, и /week отваливался бы целиком. 30 — из бюджета:
+# минус заголовок недели, до семи заголовков дней и хвост остаётся ~3900
+# символов на строки, то есть ~130 на строку с учётом HTML-тегов
+MAX_WEEK_ITEMS = 30
 
 DONE_CONFIRMED = "Готово: {title}"
 DONE_ALREADY = "Эта запись уже закрыта."
@@ -118,6 +146,28 @@ def entry_line(
     return f"{head} — {_author_suffix(entry, tz, now)}"
 
 
+def entry_lines(
+    entries,
+    tz: str,
+    now: datetime | None = None,
+    *,
+    limit: int,
+    show_date: bool = True,
+) -> list[str]:
+    """Строки списка с обрезанным хвостом.
+
+    Без потолка сообщение рано или поздно перерастает 4096 символов, Telegram
+    отвечает `TelegramBadRequest`, и дайджест пропадает молча — навсегда, потому
+    что `last_digest_on` при этом всё равно проставляется.
+    """
+    lines = [
+        entry_line(e, tz, now, show_date=show_date) for e in entries[:limit]
+    ]
+    if len(entries) > limit:
+        lines.append(MORE_ITEMS.format(count=len(entries) - limit))
+    return lines
+
+
 def entry_card(entry: Entry, tz: str, now: datetime | None = None) -> str:
     """Развёрнутая карточка одной записи — после сохранения."""
     icon = KIND_ICONS.get(entry.kind, "•")
@@ -154,10 +204,6 @@ REMINDER_LATE = "🔔 {text}\n<i>⏰ было запланировано на {w
 
 MISSED_HEADER = "🕓 <b>Пока меня не было</b> — пропущено: {count}"
 MISSED_ITEM = "• {when} — {text}"
-MISSED_MORE = "…и ещё {count}"
-# Сводка уходит одним сообщением, а у Telegram лимит 4096 символов.
-# После суток простоя пропущенных может быть много — показываем начало списка.
-MAX_SUMMARY_ITEMS = 10
 
 DIGEST_HEADER = "☀️ <b>Доброе утро!</b> Вот что на сегодня."
 DIGEST_LATE_NOTE = "<i>Сводка задержалась — меня не было в сети.</i>"
@@ -173,8 +219,8 @@ REMIND_NO_DATE = (
 )
 REMIND_NO_TEXT = "Понял время, но не понял, о чём напомнить."
 REMIND_RECURRING = (
-    "Повторяющиеся напоминания я пока не разбираю из текста. "
-    "Заведите его через /new — там повторение задаётся кнопками."
+    "Повторяющиеся напоминания я пока не завожу — ни из текста, ни кнопками. "
+    "Заведите разовое: <code>/remind во вторник в 19:00 позвонить маме</code>"
 )
 REMIND_PAST = "Это время уже прошло: {when}. Напоминание не создано."
 REMIND_OK = "🔔 Напомню {when}: {text}"
@@ -201,7 +247,7 @@ def missed_summary(reminders, tz: str, now: datetime | None = None) -> str:
             )
         )
     if len(reminders) > MAX_SUMMARY_ITEMS:
-        lines.append(MISSED_MORE.format(count=len(reminders) - MAX_SUMMARY_ITEMS))
+        lines.append(MORE_ITEMS.format(count=len(reminders) - MAX_SUMMARY_ITEMS))
     return "\n".join(lines)
 
 

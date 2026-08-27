@@ -6,7 +6,9 @@ from contextlib import suppress
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.types import BotCommand, BotCommandScopeAllGroupChats
 
+from bot import texts
 from bot.config import settings
 from bot.db.session import engine
 from bot.handlers import routers
@@ -29,6 +31,19 @@ def make_bot() -> Bot:
         session=session,
         default=DefaultBotProperties(parse_mode="HTML"),
     )
+
+
+async def _publish_commands(bot: Bot) -> None:
+    """Меню команд для групп — в личке бот всё равно отвечает отказом.
+
+    Сбой здесь не должен ронять старт: без меню бот работает, просто
+    команды приходится помнить наизусть.
+    """
+    commands = [BotCommand(command=c, description=d) for c, d in texts.COMMANDS]
+    try:
+        await bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
+    except Exception:
+        log.warning("Не удалось обновить меню команд", exc_info=True)
 
 
 async def _stop_ticker(task: asyncio.Task | None) -> None:
@@ -56,6 +71,7 @@ async def main() -> None:
         me = await bot.get_me()
         log.info("Запуск @%s", me.username)
         await bot.delete_webhook(drop_pending_updates=True)
+        await _publish_commands(bot)
 
         task = asyncio.create_task(ticker.run(bot), name="ticker")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

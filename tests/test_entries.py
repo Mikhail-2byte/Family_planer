@@ -1,12 +1,13 @@
 """Запросы к записям и рендер строк — этап 1.3 и 1.5."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 import pytest
 
 from bot import texts
 from bot.db import repo
 from bot.services import timeutil as tu
+from tests.conftest import FakeMessage
 
 MSK = "Europe/Moscow"
 NOW = datetime(2026, 8, 27, 9, 0)  # 12:00 по Москве, четверг
@@ -240,3 +241,104 @@ async def test_render_page_on_empty_list_has_no_keyboard(session, family):
     text, markup = await _render_page(session, family, "tasks", 0)
     assert text == texts.EMPTY_TASKS
     assert markup is None
+
+
+# --- Правки перед живым прогоном: клавиатура и потолок недели ----------------
+
+
+@pytest.mark.asyncio
+async def test_empty_task_list_falls_back_to_the_main_keyboard(session, family, anya):
+    """Inline и нижняя клавиатура в одном сообщении несовместимы, поэтому
+    нижняя достаётся только пустому списку — где экран иначе остаётся вообще
+    без кнопок и читается как «бот сломался»."""
+    from aiogram.types import InlineKeyboardMarkup
+
+    from bot import keyboards as kb
+    from bot.handlers import views
+
+    empty = FakeMessage()
+    await views.cmd_tasks(empty, session, family)
+    assert empty.texts == [texts.EMPTY_TASKS]
+    assert empty.replies[0][1]["reply_markup"] == kb.main_keyboard()
+
+    await repo.create_entry(
+        session,
+        family_id=family.id,
+        author_id=anya.id,
+        kind="task",
+        title="Купить хлеб",
+    )
+    filled = FakeMessage()
+    await views.cmd_tasks(filled, session, family)
+    assert isinstance(filled.replies[0][1]["reply_markup"], InlineKeyboardMarkup)
+
+
+def _this_week():
+    """Текущая неделя — та же, что возьмёт хендлер: он зовёт `now_utc()` сам."""
+    today = tu.local_today(MSK)
+    monday = today - timedelta(days=today.weekday())
+    start, _ = tu.week_bounds(today, MSK)
+    return monday, start
+
+
+@pytest.mark.asyncio
+async def test_week_is_capped_and_carries_the_keyboard(session, family, anya):
+    """Без потолка семь дней перерастают 4096 символов и /week отваливается
+    целиком с TelegramBadRequest."""
+    from bot import keyboards as kb
+    from bot.handlers import views
+
+    _, start = _this_week()
+    for i in range(60):
+        await repo.create_entry(
+            session,
+            family_id=family.id,
+            author_id=anya.id,
+            kind="event",
+            title=f"встреча номер {i} по поводу молока и садика",
+            due_at=start + timedelta(hours=i * 2),  # 118 ч < 168 ч недели
+        )
+
+    message = FakeMessage()
+    await views.cmd_week(message, session, family)
+
+    text, kwargs = message.replies[0]
+    assert len(text) < 4096
+    assert texts.MORE_ITEMS.format(count=60 - texts.MAX_WEEK_ITEMS) in text
+    assert kwargs["reply_markup"] == kb.main_keyboard()
+
+
+@pytest.mark.asyncio
+async def test_week_cut_drops_the_tail_not_the_middle(session, family, anya):
+    """Выборка отсортирована `all_day DESC, due_at`, поэтому срез сырого списка
+    оставил бы все «весь день» за неделю и обрезал бы ближайшие дни."""
+    from bot.handlers import views
+
+    monday, start = _this_week()
+    for i in range(20):
+        await repo.create_entry(
+            session,
+            family_id=family.id,
+            author_id=anya.id,
+            kind="event",
+            title=f"вс {i}",
+            due_at=tu.to_utc(datetime.combine(monday + timedelta(days=6), time()), MSK),
+            all_day=True,
+        )
+        await repo.create_entry(
+            session,
+            family_id=family.id,
+            author_id=anya.id,
+            kind="event",
+            title=f"пн {i}",
+            due_at=start + timedelta(minutes=i),
+        )
+
+    message = FakeMessage()
+    await views.cmd_week(message, session, family)
+
+    text = message.texts[0]
+    # Потолок 30: понедельник помещается целиком, в хвост уходит воскресенье
+    assert text.count("пн ") == 20
+    assert text.count("вс ") == 10
+    assert texts.MORE_ITEMS.format(count=10) in text

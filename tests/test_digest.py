@@ -75,6 +75,29 @@ async def test_build_day_collects_today_and_overdue(session, family, anya):
     assert texts.HEADER_OVERDUE in text
 
 
+@pytest.mark.asyncio
+async def test_long_overdue_list_stays_within_telegram_limit(session, family, anya):
+    """Просрочка копится годами и без потолка перерастает 4096 символов.
+
+    Дальше `sending.deliver` вернул бы BROKEN, а `_send_one` всё равно проставил
+    бы `last_digest_on` — сводка пропадала бы молча каждое утро.
+    """
+    now = _msk(2026, 8, 27, 8, 0)
+    for i in range(60):
+        await repo.create_entry(
+            session, family_id=family.id, author_id=anya.id, kind="task",
+            title=f"просроченная задача номер {i} про молоко",
+            due_at=now - timedelta(days=30 + i),
+        )
+
+    text, has_content = await digest.build_day(session, family, now)
+
+    assert has_content is True
+    assert len(text) < 4096
+    assert text.count("⚠️") == 1  # только заголовок блока, строки обрезаны
+    assert texts.MORE_ITEMS.format(count=60 - texts.MAX_DAY_ITEMS) in text
+
+
 # --- отправка ----------------------------------------------------------------
 
 

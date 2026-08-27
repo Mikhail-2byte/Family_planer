@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from itertools import groupby
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,21 @@ router.message.filter(IN_GROUP)
 router.callback_query.filter(IN_GROUP_CB)
 
 PAGE_SIZE = 8
+
+
+async def edit_or_ignore(call: CallbackQuery, text: str, markup) -> None:
+    """Перерисовать сообщение, стерпев «message is not modified».
+
+    Двое могут тапнуть одну и ту же кнопку на одном сообщении: второй `edit_text`
+    получает от Telegram отказ, и без подавления исключение уходит из хендлера —
+    у нажавшего до таймаута крутится «часик». Сравнивать надо `exc.message`:
+    в тексте исключения есть и метод, и описание.
+    """
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in exc.message:
+            raise
 
 
 def _by_day(entries: list[Entry], tz: str) -> list[tuple[date, list[Entry]]]:
@@ -59,17 +75,27 @@ async def cmd_week(message: Message, session: AsyncSession, family: Family) -> N
     entries = await repo.entries_for_range(session, family.id, start, end)
 
     if not entries:
-        await message.answer(texts.EMPTY_WEEK)
+        await message.answer(texts.EMPTY_WEEK, reply_markup=kb.main_keyboard())
         return
 
+    # Режем всю неделю целиком, а не каждый день по MAX_DAY_ITEMS: дневной
+    # потолок семь раз подряд всё равно перерастает 4096. Срез делаем уже
+    # после `_by_day` — выборка отсортирована `all_day DESC, due_at`, и срез
+    # сырого списка оставил бы все «весь день» за неделю, обрезав середину,
+    # а не хвост
+    ordered = [e for _, group in _by_day(entries, family.tz) for e in group]
+    shown = ordered[: texts.MAX_WEEK_ITEMS]
+
     blocks = [texts.week_header(today - timedelta(days=today.weekday()))]
-    for day, group in _by_day(entries, family.tz):
+    for day, group in _by_day(shown, family.tz):
         lines = "\n".join(
             texts.entry_line(e, family.tz, now, show_date=False) for e in group
         )
         blocks.append(f"{texts.day_header(day, family.tz, now)}\n{lines}")
+    if len(ordered) > len(shown):
+        blocks.append(texts.MORE_ITEMS.format(count=len(ordered) - len(shown)))
 
-    await message.answer("\n\n".join(blocks))
+    await message.answer("\n\n".join(blocks), reply_markup=kb.main_keyboard())
 
 
 async def _render_page(
@@ -110,14 +136,19 @@ async def _render_page(
 @router.message(F.text == kb.BTN_TASKS)
 async def cmd_tasks(message: Message, session: AsyncSession, family: Family) -> None:
     text, markup = await _render_page(session, family, "tasks", 0)
-    await message.answer(text, reply_markup=markup)
+    # Inline и нижняя клавиатура в одном сообщении несовместимы, поэтому нижняя
+    # достаётся только пустому списку — где она и нужнее всего: экран без единой
+    # кнопки читается как «бот сломался». Подставлять её внутри `_render_page`
+    # нельзя: оттуда разметка уходит ещё и в `edit_text` у `turn_page` /
+    # `mark_done`, а `editMessageText` принимает только InlineKeyboardMarkup
+    await message.answer(text, reply_markup=markup or kb.main_keyboard())
 
 
 @router.message(Command("notes"))
 @router.message(F.text == kb.BTN_NOTES)
 async def cmd_notes(message: Message, session: AsyncSession, family: Family) -> None:
     text, markup = await _render_page(session, family, "notes", 0)
-    await message.answer(text, reply_markup=markup)
+    await message.answer(text, reply_markup=markup or kb.main_keyboard())
 
 
 @router.callback_query(kb.PageCB.filter())
@@ -127,11 +158,13 @@ async def turn_page(
     session: AsyncSession,
     family: Family,
 ) -> None:
+    # Ответ первым: если перерисовка упрётся в ошибку, у человека всё равно
+    # не должен остаться крутящийся индикатор
+    await call.answer()
     text, markup = await _render_page(
         session, family, callback_data.view, callback_data.offset
     )
-    await call.message.edit_text(text, reply_markup=markup)
-    await call.answer()
+    await edit_or_ignore(call, text, markup)
 
 
 @router.callback_query(kb.DoneCB.filter())
@@ -151,7 +184,7 @@ async def mark_done(
 
     await call.answer(texts.DONE_CONFIRMED.format(title=entry.title[:60]))
     text, markup = await _render_page(session, family, "tasks", callback_data.offset)
-    await call.message.edit_text(text, reply_markup=markup)
+    await edit_or_ignore(call, text, markup)
 
 
 @router.message(Command("find"))
@@ -160,12 +193,14 @@ async def cmd_find(
 ) -> None:
     query = (command.args or "").strip()
     if not query:
-        await message.answer(texts.FIND_USAGE)
+        await message.answer(texts.FIND_USAGE, reply_markup=kb.main_keyboard())
         return
 
     found = await repo.search_entries(session, family.id, query)
     if not found:
-        await message.answer(texts.search_empty(query))
+        await message.answer(
+            texts.search_empty(query), reply_markup=kb.main_keyboard()
+        )
         return
 
     now = tu.now_utc()
@@ -176,13 +211,13 @@ async def cmd_find(
     if len(found) == repo.SEARCH_LIMIT:
         # Иначе заголовок «Найдено: 20» выглядит как точное число совпадений
         blocks.append(texts.SEARCH_TRUNCATED.format(limit=repo.SEARCH_LIMIT))
-    await message.answer("\n".join(blocks))
+    await message.answer("\n".join(blocks), reply_markup=kb.main_keyboard())
 
 
 @router.message(F.text == kb.BTN_BUY)
 async def buy_not_ready(message: Message) -> None:
     """Кнопка стоит на клавиатуре с этапа 1, а списки будут на этапе 4."""
-    await message.answer(texts.SOON_SHOPPING)
+    await message.answer(texts.SOON_SHOPPING, reply_markup=kb.main_keyboard())
 
 
 @router.message(Command("family"))

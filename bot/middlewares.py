@@ -12,14 +12,45 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Chat, Message, TelegramObject, Update, User
 
+from bot import texts
 from bot.db import repo
 from bot.db.session import Session
 
 log = logging.getLogger(__name__)
 
 GROUP_CHATS = {"group", "supergroup"}
+
+
+async def drop_wizard_state(
+    handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+    event: Message,
+    data: dict[str, Any],
+) -> Any:
+    """Просмотр или команда посреди `/new` обрывает мастер вслух.
+
+    Роутеры просмотра стоят раньше мастера, поэтому `/today` или кнопка
+    нижней клавиатуры выигрывают у шага мастера. Состояние при этом
+    оставалось висеть, и следующая реплика человека молча становилась
+    заголовком записи — хоть через три дня, таймаута у FSM нет.
+
+    Middleware внутренний: он вызывается, только когда хендлер своего
+    роутера уже прошёл фильтры, то есть ровно в момент перехвата.
+    Ключ состояния — «чат + пользователь», поэтому реплика второго
+    участника чужой мастер не трогает.
+    """
+    state: FSMContext | None = data.get("state")
+    dropped = state is not None and await state.get_state() is not None
+    if dropped:
+        await state.clear()
+
+    result = await handler(event, data)
+    if dropped:
+        # Ответ на саму команду важнее — уведомление идёт следом
+        await event.answer(texts.WIZARD_DROPPED)
+    return result
 
 
 def _display_name(user: User) -> str:

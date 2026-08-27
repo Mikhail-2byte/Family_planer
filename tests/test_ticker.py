@@ -261,3 +261,21 @@ async def test_ticker_uses_settings_thresholds(session, family, anya, bot, monke
     await _add(session, family, anya, text="дело", fire_at=NOW - timedelta(minutes=5))
     await ticker.send_due_reminders(bot, session, NOW)
     assert "было запланировано на" in bot.texts[0]
+
+
+def test_next_fire_at_ignores_dtstart_inside_the_rule():
+    """`rrulestr` при DTSTART в строке игнорирует аргумент `dtstart`.
+
+    Без срезки якорем становилась дата из правила, и «каждый вторник в 19:00»
+    уезжало во вторник в 00:00 — время суток серии терялось молча.
+    """
+    fire_at = _msk(2026, 8, 25, 19, 0)  # вторник 19:00 по Москве
+    with_dtstart = "DTSTART:20200101T000000\nRRULE:FREQ=WEEKLY;BYDAY=TU"
+
+    following = ticker.next_fire_at(with_dtstart, fire_at, fire_at, MSK)
+    assert tu.to_local(following, MSK) == datetime(2026, 9, 1, 19, 0)
+
+
+def test_next_fire_at_returns_none_when_only_dtstart_is_left():
+    """После срезки правила не остаётся — гасим, а не срабатываем каждый тик."""
+    assert ticker.next_fire_at("DTSTART:20200101T000000", NOW, NOW, MSK) is None

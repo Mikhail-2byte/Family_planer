@@ -68,6 +68,11 @@ SQLite через SQLAlchemy 2.0 async + aiosqlite, миграции — Alembic
 `bot/filters.py` — `IN_GROUP` (для сообщений) и `IN_GROUP_CB` (для колбэков: у
 `CallbackQuery` чат лежит внутри `message`). Групповые роутеры вешают их разом:
 `router.message.filter(IN_GROUP)` + `router.callback_query.filter(IN_GROUP_CB)`.
+Там же `IN_PRIVATE`: на нём в `admin.py` висит хендлер `private_chat` — ловушка,
+отвечающая `PRIVATE_CHAT` на **любое** сообщение в личке. Она стоит в первом
+роутере и без других фильтров, поэтому безопасна ровно до тех пор, пока у
+`views`, `remind` и `new_entry` на `message` висит `IN_GROUP`: снимете фильтр —
+хендлер молча уйдёт в отказ. Страховка — `test_group_routers_never_run_in_private`.
 
 `bot/db/repo.py` — все запросы к БД. Принимает `AsyncSession` первым аргументом и ничего
 не знает про aiogram; это делает его тестируемым напрямую (`tests/conftest.py`).
@@ -86,7 +91,11 @@ SQLite через SQLAlchemy 2.0 async + aiosqlite, миграции — Alembic
 Новый роутер: создать модуль в `bot/handlers/`, объявить `router = Router()`,
 добавить в список `routers` в `bot/handlers/__init__.py`. **Порядок в списке значим:**
 `views` идёт раньше `new_entry`, иначе команда, набранная посреди `/new`, будет
-проглочена FSM-хендлером как текст записи.
+проглочена FSM-хендлером как текст записи. Обратная сторона этого порядка —
+`drop_wizard_state` (`bot/middlewares.py`): внутренний middleware, который вешается
+в том же `__init__.py` на все роутеры **кроме мастера** и обрывает зависшее
+состояние `/new`, когда сообщение перехватил кто-то другой. Новый роутер, стоящий
+раньше `new_entry`, тоже должен его получить.
 
 Фоновые сервисы (`services/ticker.py`, `services/digest.py`) идут мимо диспетчера,
 а значит и мимо `FamilyMiddleware` — они открывают `Session()` сами и берут таймзону
@@ -106,6 +115,8 @@ SQLite через SQLAlchemy 2.0 async + aiosqlite, миграции — Alembic
 
 - **Никакого `/start`.** Семья и участники заводятся сами по первому же апдейту из группы
   (`get_or_create_family` / `get_or_create_member`). Не добавлять команду-инициализацию.
+  Кнопка START в личке шлёт `/start`, и он попадает в общую ловушку `private_chat`,
+  которая отвечает «работаю только в группе» и ничего не инициализирует.
 - **Всё время в БД — naive UTC** (SQLite таймзон не знает). Таймзона семьи (`Family.tz`)
   применяется только на границе ввода и вывода — через `bot/services/timeutil.py`.
   Модуль чистый: ни БД, ни aiogram внутри.

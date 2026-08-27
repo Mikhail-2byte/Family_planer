@@ -45,6 +45,21 @@ def classify_lateness(
     return SUMMARY
 
 
+def _without_dtstart(rrule: str) -> str:
+    """Выбросить из правила собственные DTSTART/DTEND.
+
+    `rrulestr` при наличии `DTSTART` в строке **игнорирует** аргумент `dtstart`,
+    и якорем серии молча становится дата из правила: «каждый вторник в 19:00»
+    превращается во вторник в 00:00. Сами мы такие строки не пишем, но с этапа
+    3a `rrule` приходит от LLM, а модели дописывают `DTSTART` охотно.
+    """
+    return "\n".join(
+        line
+        for line in rrule.splitlines()
+        if not line.strip().upper().startswith(("DTSTART", "DTEND"))
+    )
+
+
 def next_fire_at(
     rrule: str, dtstart_utc: datetime, after_utc: datetime, tz: str
 ) -> datetime | None:
@@ -59,7 +74,9 @@ def next_fire_at(
     срабатывания намеренно перешагиваются — про них уже сказала сводка догонки.
     """
     try:
-        rule = rrulestr(rrule, dtstart=tu.to_local(dtstart_utc, tz))
+        rule = rrulestr(
+            _without_dtstart(rrule), dtstart=tu.to_local(dtstart_utc, tz)
+        )
         following = rule.after(tu.to_local(after_utc, tz))
     except (ValueError, TypeError, OverflowError):
         return None

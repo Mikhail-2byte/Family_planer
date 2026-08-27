@@ -43,6 +43,7 @@ run.cmd
 
 ```bash
 # скопировать на сервер data/ и .env
+chown -R 1000:1000 ./data   # процесс в контейнере не root и иначе не создаст БД
 docker compose up -d
 docker compose logs -f
 ```

@@ -74,6 +74,13 @@ def test_parse_when_refuses_rather_than_guesses(raw):
         "каждую пятницу платить за садик",
         "ежедневно пить таблетки",
         "по будням будильник",
+        # Порядок слов в /remind свободный — ключевое слово бывает и в хвосте.
+        # С якорем на начале строки эти четыре молча становились разовыми:
+        # «позвонить маме каждый» на ближайший вторник, и никто бы не заметил
+        "позвонить маме каждый вторник в 19:00",
+        "тренировка каждую пятницу",
+        "выносить мусор ежедневно в 21:00",
+        "будильник по будням",
     ],
 )
 def test_recurring_phrases_are_recognised(raw):
@@ -138,10 +145,14 @@ async def test_remind_without_args_shows_usage(session, family, anya):
 
 
 @pytest.mark.asyncio
-async def test_remind_refuses_recurring(session, family, anya):
+@pytest.mark.parametrize(
+    "raw",
+    ["каждый вторник в 19 тренировка", "тренировка каждый вторник в 19"],
+)
+async def test_remind_refuses_recurring(session, family, anya, raw):
     from bot import texts
 
-    replies = await _run(session, family, anya, "каждый вторник в 19 тренировка")
+    replies = await _run(session, family, anya, raw)
     assert replies == [texts.REMIND_RECURRING]
     assert await repo.due_reminders(session, tu.to_utc(datetime(2027, 1, 1), MSK)) == []
 
