@@ -71,9 +71,15 @@ SQLite через SQLAlchemy 2.0 async + aiosqlite, миграции — Alembic
 не знает про aiogram; это делает его тестируемым напрямую (`tests/conftest.py`).
 
 `bot/texts.py` — все русские строки **и единый рендер записей**: `entry_line`
-(строка списка), `entry_card` (карточка), `day_header`. Форматировать записи в хендлерах
-нельзя — только звать эти функции. `parse_mode="HTML"` включён по умолчанию, поэтому
-пользовательский текст идёт через `_escape`.
+(строка списка), `entry_card` (карточка), `day_header`, `week_header`. Форматировать
+записи и даты в хендлерах нельзя — только звать эти функции.
+
+`parse_mode="HTML"` включён по умолчанию, поэтому **любой** текст, введённый человеком,
+идёт через `_escape`. Внутри `entry_line`/`entry_card` это уже сделано; для остальных
+подстановок в `texts.py` есть функции-обёртки — `search_header`, `search_empty`,
+`family_header`, `family_member`, `pong`. Подставлять `.format(...)` в шаблон прямо
+из хендлера нельзя: имя участника и название чата задаёт пользователь, и `<` в них
+превращает отправку в `TelegramBadRequest: can't parse entities`.
 
 Новый роутер: создать модуль в `bot/handlers/`, объявить `router = Router()`,
 добавить в список `routers` в `bot/handlers/__init__.py`. **Порядок в списке значим:**
@@ -130,8 +136,14 @@ async-сессия упадёт на ленивой подгрузке авто�
 ## Тесты
 
 `pytest.ini`: `asyncio_mode = strict` — каждому async-тесту нужен `@pytest.mark.asyncio`,
-async-фикстуре — `@pytest_asyncio.fixture`. Общие фикстуры (`session`, `family`, `anya`)
-лежат в `tests/conftest.py`.
+async-фикстуре — `@pytest_asyncio.fixture`. Общие фикстуры лежат в `tests/conftest.py`:
+`session_maker` (фабрика на общей БД в памяти), `session`, `family`, `anya`.
+`session_maker` нужен там, где сессию открывает не тест, а сам код: например,
+`FamilyMiddleware` зовёт `Session()` сам, и в тесте его подменяют через `monkeypatch`.
+
+`tests/test_regressions.py` — по тесту на каждый баг, найденный ревизией этапов 0–1.
+Тесты там написаны так, чтобы падать на коде «до правки»; если один из них станет
+зелёным при откате фикса, он потерял смысл.
 
 Схема в тестах строится через `Base.metadata.create_all` на `sqlite+aiosqlite:///:memory:`,
 **миграции не участвуют**. Правка модели без новой ревизии Alembic даёт зелёные тесты и
