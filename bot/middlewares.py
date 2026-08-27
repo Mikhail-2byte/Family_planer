@@ -102,11 +102,21 @@ class FamilyMiddleware(BaseMiddleware):
         """Возвращает True, если чат перестал существовать под текущим chat_id."""
         if message is None:
             return False
+        # Служебных сообщений о переезде приходит два — из старого чата и из
+        # нового, — так что второй вызов штатно не делает ничего. Логируем по
+        # результату: строка «семья переехала» на несостоявшемся переезде
+        # прятала бы как раз ту поломку, которую ловим
         if message.migrate_to_chat_id:
-            await repo.migrate_family_chat_id(session, chat.id, message.migrate_to_chat_id)
-            log.info("Семья переехала: %s → %s", chat.id, message.migrate_to_chat_id)
+            moved = await repo.migrate_family_chat_id(
+                session, chat.id, message.migrate_to_chat_id
+            )
+            if moved:
+                log.info("Семья переехала: %s → %s", chat.id, message.migrate_to_chat_id)
             return True
         if message.migrate_from_chat_id:
-            await repo.migrate_family_chat_id(session, message.migrate_from_chat_id, chat.id)
-            log.info("Семья переехала: %s → %s", message.migrate_from_chat_id, chat.id)
+            moved = await repo.migrate_family_chat_id(
+                session, message.migrate_from_chat_id, chat.id
+            )
+            if moved:
+                log.info("Семья переехала: %s → %s", message.migrate_from_chat_id, chat.id)
         return False

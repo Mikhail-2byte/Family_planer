@@ -1,6 +1,6 @@
 """Авторегистрация семьи и участников — этап 0.7."""
 
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -41,6 +41,78 @@ async def test_group_migrated_to_supergroup(session):
     assert await repo.get_family(session, -1001) is None
     moved = await repo.get_family(session, -100200300)
     assert moved is not None and moved.id == family.id
+
+
+@pytest.mark.asyncio
+async def test_migration_survives_autocreated_family_at_the_new_chat_id(session):
+    """Гонка живого переезда 27.08.2026: пустышка на новом chat_id.
+
+    Telegram шлёт разом служебное сообщение о переезде и апдейт о боте в новом
+    чате, а aiogram обрабатывает апдейты параллельно — автосоздание успевает
+    завести семью на новом `chat_id` раньше. Слепой `UPDATE` падал на
+    `UNIQUE constraint failed`, апдейт терялся (offset уже сдвинут), и в базе
+    оставались две семьи: старая со всей историей и пустая новая, которой и
+    начинал жить бот.
+    """
+    old = await repo.get_or_create_family(session, -1001, "Семья")
+    anya = await repo.get_or_create_member(session, old.id, 222, "Аня")
+    await repo.create_entry(
+        session, family_id=old.id, author_id=anya.id, kind="task", title="Молоко"
+    )
+    # Автосоздание опередило служебное сообщение
+    stub = await repo.get_or_create_family(session, -100200300, "Семья")
+    await repo.get_or_create_member(session, stub.id, 222, "Аня")
+    assert stub.id != old.id
+
+    assert await repo.migrate_family_chat_id(session, -1001, -100200300)
+
+    moved = await repo.get_family(session, -100200300)
+    assert moved is not None and moved.id == old.id  # переехала настоящая семья
+    assert await repo.get_family(session, -1001) is None
+    assert len(await repo.all_families(session)) == 1  # пустышки больше нет
+    assert len(await repo.members_of(session, old.id)) == 1
+    entries, total = await repo.entries_by_kind(session, old.id, "task")
+    assert total == 1 and entries[0].title == "Молоко"
+
+
+@pytest.mark.asyncio
+async def test_migration_keeps_hands_off_a_new_family_with_data(session):
+    """Если на новом chat_id уже есть семья с записями — отказ, а не склейка.
+
+    Случай почти невозможный, но тихо слить две семьи хуже, чем громко отказать:
+    сливать пришлось бы участников с дедупликацией, и ошибка здесь необратима.
+    """
+    old = await repo.get_or_create_family(session, -1001, "Семья")
+    other = await repo.get_or_create_family(session, -100200300, "Чужая")
+    member = await repo.get_or_create_member(session, other.id, 333, "Миша")
+    await repo.create_entry(
+        session, family_id=other.id, author_id=member.id, kind="task", title="Чужое"
+    )
+
+    assert not await repo.migrate_family_chat_id(session, -1001, -100200300)
+    assert len(await repo.all_families(session)) == 2
+    assert (await repo.get_family(session, -1001)).id == old.id
+
+
+@pytest.mark.asyncio
+async def test_migration_drops_the_panel_of_the_old_chat(session):
+    """message_id панели принадлежал старому чату — в новом он уже не наш."""
+    family = await repo.get_or_create_family(session, -1001, "Семья")
+    await repo.set_panel(session, family, 158, date(2026, 8, 27))
+
+    await repo.migrate_family_chat_id(session, -1001, -100200300)
+
+    moved = await repo.get_family(session, -100200300)
+    assert moved.panel_message_id is None and moved.panel_day is None
+
+
+@pytest.mark.asyncio
+async def test_second_migration_message_is_harmless(session):
+    """Служебных сообщений о переезде приходит два — из старого чата и нового."""
+    await repo.get_or_create_family(session, -1001, "Семья")
+    assert await repo.migrate_family_chat_id(session, -1001, -100200300)
+    assert not await repo.migrate_family_chat_id(session, -1001, -100200300)
+    assert len(await repo.all_families(session)) == 1
 
 
 @pytest.mark.asyncio

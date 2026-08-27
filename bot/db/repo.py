@@ -1,19 +1,22 @@
 """Запросы к БД. Ничего не знает про aiogram — принимает сессию и данные."""
 
+import logging
 from datetime import date, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import settings
 from bot.db import sqlite as _sqlite  # noqa: F401  — регистрирует lower_unicode
-from bot.db.models import Entry, Family, Member, Reminder
+from bot.db.models import Entry, Family, ListModel, Member, Reminder
 from bot.services.timeutil import now_utc
 
 # Сколько напоминаний забирает один тик. Если бот лежал месяц, не нужно тянуть
 # из базы всё сразу: остаток догонится следующим тиком, а по факту схлопнется
 # в одну сводку.
 DUE_LIMIT = 200
+
+log = logging.getLogger(__name__)
 
 
 async def get_family(session: AsyncSession, chat_id: int) -> Family | None:
@@ -336,19 +339,59 @@ async def set_panel(
     await session.commit()
 
 
+async def _family_is_empty(session: AsyncSession, family_id: int) -> bool:
+    """У семьи нет ничего, кроме неё самой и автозаведённых участников."""
+    for model in (Entry, Reminder, ListModel):
+        count = await session.scalar(
+            select(func.count()).select_from(model).where(model.family_id == family_id)
+        )
+        if count:
+            return False
+    return True
+
+
 async def migrate_family_chat_id(
     session: AsyncSession, old_chat_id: int, new_chat_id: int
 ) -> bool:
     """Группа стала супергруппой — у неё сменился chat_id (см. PLAN.md, п. 1d).
 
     Без этого бот просто замолчит: семья привязана к старому chat_id.
+
+    Слепой `UPDATE ... WHERE chat_id = old` здесь недостаточен, и это выяснилось
+    живым переездом 27.08. Telegram присылает разом и служебное сообщение о
+    переезде, и апдейт о боте в новом чате, а aiogram обрабатывает апдейты
+    параллельно — автосоздание успевает завести семью на новом `chat_id` раньше,
+    и `UPDATE` падает на `UNIQUE constraint failed: families.chat_id`. Апдейт при
+    этом теряется навсегда (offset Telegram уже сдвинут), а в базе остаются две
+    семьи: старая со всей историей и пустая новая, которой и начинает жить бот.
+
+    Поэтому пустышка на новом `chat_id` удаляется, а переезжает старая семья —
+    вместе с записями, напоминаниями и участниками.
     """
     if old_chat_id == new_chat_id:
         return False
-    result = await session.execute(
-        update(Family)
-        .where(Family.chat_id == old_chat_id)
-        .values(chat_id=new_chat_id, panel_message_id=None, panel_day=None)
-    )
+
+    family = await get_family(session, old_chat_id)
+    if family is None:
+        return False  # уже переехали: служебных сообщений о переезде приходит два
+
+    stub = await get_family(session, new_chat_id)
+    if stub is not None and stub.id != family.id:
+        if not await _family_is_empty(session, stub.id):
+            # Успела набрать данные — сливать их автоматически не рискуем:
+            # тихая склейка двух семей хуже, чем громкий отказ
+            log.error(
+                "Переезд %s → %s: на новом chat_id уже есть семья #%s с данными",
+                old_chat_id, new_chat_id, stub.id,
+            )
+            return False
+        # Участники у пустышки — дубликаты настоящих, записей за ними нет
+        await session.execute(delete(Member).where(Member.family_id == stub.id))
+        await session.execute(delete(Family).where(Family.id == stub.id))
+
+    family.chat_id = new_chat_id
+    # Панель жила в старом чате, и её message_id в новом уже не наш
+    family.panel_message_id = None
+    family.panel_day = None
     await session.commit()
-    return bool(result.rowcount)
+    return True
