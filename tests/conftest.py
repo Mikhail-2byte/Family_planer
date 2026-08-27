@@ -1,3 +1,4 @@
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -37,3 +38,31 @@ async def family(session):
 @pytest_asyncio.fixture
 async def anya(session, family):
     return await repo.get_or_create_member(session, family.id, 222, "Аня")
+
+
+class FakeBot:
+    """Заглушка вместо `Bot`: складывает отправленное в список.
+
+    Настоящий `Bot` в тестах не создаётся никогда — сети в тестах нет.
+    `fail_on` позволяет проверить, что сбой одной отправки не срывает остальные.
+    """
+
+    def __init__(self, fail_on=None):
+        self.sent: list[tuple[int, str]] = []
+        self._fail_on = fail_on or {}
+
+    async def send_message(self, chat_id: int, text: str, **kwargs):
+        error = self._fail_on.get(len(self.sent))
+        self.sent.append((chat_id, text))
+        if error is not None:
+            raise error
+        return None
+
+    @property
+    def texts(self) -> list[str]:
+        return [text for _, text in self.sent]
+
+
+@pytest.fixture
+def bot():
+    return FakeBot()

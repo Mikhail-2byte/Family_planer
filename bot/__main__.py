@@ -1,14 +1,17 @@
 import asyncio
 import logging
 import sys
+from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 
 from bot.config import settings
+from bot.db.session import engine
 from bot.handlers import routers
 from bot.middlewares import FamilyMiddleware
+from bot.services import ticker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +31,15 @@ def make_bot() -> Bot:
     )
 
 
+async def _stop_ticker(task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    task.cancel()
+    # CancelledError здесь ожидаем — это ответ на нашу же отмену
+    with suppress(asyncio.CancelledError):
+        await task
+
+
 async def main() -> None:
     if not settings.bot_token:
         log.error("BOT_TOKEN пуст. Заполните его в .env — токен даёт @BotFather.")
@@ -39,14 +51,23 @@ async def main() -> None:
     for router in routers:
         dp.include_router(router)
 
-    me = await bot.get_me()
-    log.info("Запуск @%s", me.username)
-
-    await bot.delete_webhook(drop_pending_updates=True)
+    task: asyncio.Task | None = None
     try:
+        me = await bot.get_me()
+        log.info("Запуск @%s", me.username)
+        await bot.delete_webhook(drop_pending_updates=True)
+
+        task = asyncio.create_task(ticker.run(bot), name="ticker")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        await bot.session.close()
+        # Порядок обязателен: сначала перестаём порождать отправки, потом
+        # закрываем сеть, последним — движок БД. Каждый шаг в своём try,
+        # чтобы падение одного не съело остальные
+        for step in (_stop_ticker(task), bot.session.close(), engine.dispose()):
+            try:
+                await step
+            except Exception:
+                log.exception("Ошибка при остановке")
 
 
 if __name__ == "__main__":

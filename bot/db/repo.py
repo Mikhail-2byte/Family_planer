@@ -1,6 +1,6 @@
 """Запросы к БД. Ничего не знает про aiogram — принимает сессию и данные."""
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,9 +10,23 @@ from bot.db import sqlite as _sqlite  # noqa: F401  — регистрирует
 from bot.db.models import Entry, Family, Member, Reminder
 from bot.services.timeutil import now_utc
 
+# Сколько напоминаний забирает один тик. Если бот лежал месяц, не нужно тянуть
+# из базы всё сразу: остаток догонится следующим тиком, а по факту схлопнется
+# в одну сводку.
+DUE_LIMIT = 200
+
 
 async def get_family(session: AsyncSession, chat_id: int) -> Family | None:
     return await session.scalar(select(Family).where(Family.chat_id == chat_id))
+
+
+async def get_family_by_id(session: AsyncSession, family_id: int) -> Family | None:
+    return await session.get(Family, family_id)
+
+
+async def all_families(session: AsyncSession) -> list[Family]:
+    result = await session.scalars(select(Family).order_by(Family.id))
+    return list(result)
 
 
 async def get_or_create_family(
@@ -247,6 +261,63 @@ async def create_reminder(
     await session.commit()
     await session.refresh(reminder)
     return reminder
+
+
+async def due_reminders(
+    session: AsyncSession, now: datetime | None = None, *, limit: int = DUE_LIMIT
+) -> list[Reminder]:
+    """Созревшие напоминания всех семей, самые старые первыми.
+
+    Напоминания уже закрытой записи отсеиваются: `complete_entry` про
+    `reminders` ничего не знает, поэтому иначе выполненная задача продолжала бы
+    пинговать до самого срока.
+    """
+    moment = now or now_utc()
+    result = await session.scalars(
+        select(Reminder)
+        .outerjoin(Entry, Reminder.entry_id == Entry.id)
+        .where(
+            Reminder.active.is_(True),
+            Reminder.sent_at.is_(None),
+            Reminder.fire_at <= moment,
+            (Reminder.entry_id.is_(None)) | (Entry.status == "open"),
+        )
+        .order_by(Reminder.fire_at)
+        .limit(limit)
+    )
+    return list(result)
+
+
+async def mark_reminder_sent(
+    session: AsyncSession, reminder: Reminder, sent_at: datetime | None = None
+) -> None:
+    """Закрыть разовое напоминание."""
+    reminder.sent_at = sent_at or now_utc()
+    await session.commit()
+
+
+async def reschedule_reminder(
+    session: AsyncSession, reminder: Reminder, fire_at: datetime
+) -> None:
+    """Сдвинуть повторяющееся напоминание на следующий срок.
+
+    `sent_at` намеренно остаётся пустым: у повторяющегося признак «отработало»
+    — это `fire_at` в будущем. Иначе пришлось бы усложнять выборку тикера.
+    """
+    reminder.fire_at = fire_at
+    await session.commit()
+
+
+async def deactivate_reminder(session: AsyncSession, reminder: Reminder) -> None:
+    reminder.active = False
+    await session.commit()
+
+
+async def set_last_digest_on(
+    session: AsyncSession, family: Family, day: date
+) -> None:
+    family.last_digest_on = day
+    await session.commit()
 
 
 async def migrate_family_chat_id(

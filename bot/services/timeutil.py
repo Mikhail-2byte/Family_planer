@@ -55,6 +55,11 @@ def day_bounds(day: date, tz_name: str) -> tuple[datetime, datetime]:
     return start, end
 
 
+def at_local_time(day: date, moment: time, tz_name: str) -> datetime:
+    """Локальные «27 августа, 08:00» → наивный UTC. Момент дайджеста."""
+    return to_utc(datetime.combine(day, moment), tz_name)
+
+
 def week_bounds(day: date, tz_name: str) -> tuple[datetime, datetime]:
     """Границы недели (с понедельника), в которую попадает `day`."""
     monday = day - timedelta(days=day.weekday())

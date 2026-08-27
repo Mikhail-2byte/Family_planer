@@ -13,6 +13,7 @@ from bot import texts
 from bot.db import repo
 from bot.db.models import Entry, Family, Member
 from bot.filters import IN_GROUP, IN_GROUP_CB
+from bot.services import digest
 from bot.services import timeutil as tu
 
 router = Router()
@@ -44,31 +45,10 @@ def _by_day(entries: list[Entry], tz: str) -> list[tuple[date, list[Entry]]]:
 @router.message(Command("today"))
 @router.message(F.text == kb.BTN_TODAY)
 async def cmd_today(message: Message, session: AsyncSession, family: Family) -> None:
-    now = tu.now_utc()
-    today = tu.local_today(family.tz, now)
-    start, end = tu.day_bounds(today, family.tz)
-
-    entries = await repo.entries_for_range(session, family.id, start, end)
-    overdue = await repo.overdue_entries(session, family.id, start)
-
-    blocks: list[str] = []
-    if overdue:
-        blocks.append(
-            texts.HEADER_OVERDUE
-            + "\n"
-            + "\n".join(texts.entry_line(e, family.tz, now) for e in overdue)
-        )
-
-    body = "\n".join(
-        texts.entry_line(e, family.tz, now, show_date=False) for e in entries
-    )
-    blocks.append(
-        texts.day_header(today, family.tz, now)
-        + "\n"
-        + (body or texts.EMPTY_TODAY)
-    )
-
-    await message.answer("\n\n".join(blocks), reply_markup=kb.main_keyboard())
+    # Тот же сборщик, что и у утреннего дайджеста: иначе два вывода одного и
+    # того же дня разойдутся при первой же правке формата
+    text, _ = await digest.build_day(session, family)
+    await message.answer(text, reply_markup=kb.main_keyboard())
 
 
 @router.message(Command("week"))

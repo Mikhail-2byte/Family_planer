@@ -145,3 +145,69 @@ def week_header(monday: date) -> str:
     return HEADER_WEEK.format(
         start=tu.day_stamp(monday), end=tu.day_stamp(monday + timedelta(days=6))
     )
+
+
+# --- Этап 2: напоминания, догонка, дайджест ---------------------------------
+
+REMINDER = "🔔 {text}"
+REMINDER_LATE = "🔔 {text}\n<i>⏰ было запланировано на {when}</i>"
+
+MISSED_HEADER = "🕓 <b>Пока меня не было</b> — пропущено: {count}"
+MISSED_ITEM = "• {when} — {text}"
+MISSED_MORE = "…и ещё {count}"
+# Сводка уходит одним сообщением, а у Telegram лимит 4096 символов.
+# После суток простоя пропущенных может быть много — показываем начало списка.
+MAX_SUMMARY_ITEMS = 10
+
+DIGEST_HEADER = "☀️ <b>Доброе утро!</b> Вот что на сегодня."
+DIGEST_LATE_NOTE = "<i>Сводка задержалась — меня не было в сети.</i>"
+
+REMIND_USAGE = (
+    "Как пользоваться: <code>/remind через 2 минуты позвонить маме</code>\n"
+    "Можно и наоборот: <code>/remind позвонить маме завтра в 19:00</code>"
+)
+REMIND_NO_DATE = (
+    "Не понял, когда напомнить. Укажите время словами — «через час», "
+    "«завтра в 19:00», «в понедельник в 9:00».\n"
+    "Или заведите запись через /new."
+)
+REMIND_NO_TEXT = "Понял время, но не понял, о чём напомнить."
+REMIND_RECURRING = (
+    "Повторяющиеся напоминания я пока не разбираю из текста. "
+    "Заведите его через /new — там повторение задаётся кнопками."
+)
+REMIND_PAST = "Это время уже прошло: {when}. Напоминание не создано."
+REMIND_OK = "🔔 Напомню {when}: {text}"
+
+
+def reminder_message(
+    reminder, tz: str, now: datetime | None = None, *, late: bool = False
+) -> str:
+    """Само напоминание. Текст пишет человек — только через экранирование."""
+    body = _escape(reminder.text)
+    if not late:
+        return REMINDER.format(text=body)
+    return REMINDER_LATE.format(text=body, when=tu.fmt_due(reminder.fire_at, tz, now=now))
+
+
+def missed_summary(reminders, tz: str, now: datetime | None = None) -> str:
+    """Одно сообщение вместо пачки: ПК был выключен дольше порога сводки."""
+    lines = [MISSED_HEADER.format(count=len(reminders))]
+    for reminder in reminders[:MAX_SUMMARY_ITEMS]:
+        lines.append(
+            MISSED_ITEM.format(
+                when=tu.fmt_due(reminder.fire_at, tz, now=now),
+                text=_escape(reminder.text),
+            )
+        )
+    if len(reminders) > MAX_SUMMARY_ITEMS:
+        lines.append(MISSED_MORE.format(count=len(reminders) - MAX_SUMMARY_ITEMS))
+    return "\n".join(lines)
+
+
+def remind_saved(text: str, fire_at: datetime, tz: str, now: datetime | None = None) -> str:
+    return REMIND_OK.format(when=tu.fmt_due(fire_at, tz, now=now), text=_escape(text))
+
+
+def remind_in_past(fire_at: datetime, tz: str, now: datetime | None = None) -> str:
+    return REMIND_PAST.format(when=tu.fmt_due(fire_at, tz, now=now))
