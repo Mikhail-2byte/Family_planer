@@ -144,6 +144,12 @@ async def _redraw(
     if family.panel_message_id is not None and not _outdated(family, now, last_message_id):
         status = await sending.edit(bot, family, family.panel_message_id, text)
         if status in (sending.OK, sending.RETRY, sending.BROKEN):
+            # Единственный внешний признак, что дебаунс сработал: на серию
+            # правок подряд в логе обязана быть одна строка, а не по строке
+            # на каждую запись
+            log.info(
+                "Панель #%s: правка, %s", family.panel_message_id, status
+            )
             return
         # Осталось NOT_FOUND (панель удалили руками) и FORBIDDEN (выгнали) —
         # оба разбирает `_publish`
@@ -189,6 +195,7 @@ async def _publish(
     # Пишем в базу ДО закрепления. Если прав админа нет, панель обязана остаться
     # незакреплённой, а не выпускаться заново на каждой правке
     await repo.set_panel(session, family, message_id, tu.local_today(family.tz, now))
+    log.info("Панель выпущена заново: #%s вместо #%s", message_id, previous)
     if previous is not None:
         await _pin(bot, family, previous, pin=False)
     await _pin(bot, family, message_id, pin=True)
