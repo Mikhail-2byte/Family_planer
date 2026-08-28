@@ -22,7 +22,7 @@ from bot.config import settings
 from bot.db import repo
 from bot.db.models import Family, Reminder
 from bot.db.session import Session
-from bot.services import digest, panel, sending
+from bot.services import backup, digest, panel, sending
 from bot.services import timeutil as tu
 
 log = logging.getLogger(__name__)
@@ -104,15 +104,19 @@ async def run(bot: Bot) -> None:
 async def tick_once(
     bot: Bot, session: AsyncSession, now: datetime | None = None
 ) -> None:
-    """Одна итерация: напоминания, дайджест и панель, если она отстала от суток.
+    """Одна итерация: напоминания, дайджест, панель и ежедневный бэкап.
 
     `refresh_stale` в обычный тик не ходит в Telegram вовсе — только читает
-    семьи; перевыпуск случается раз в локальные сутки.
+    семьи; перевыпуск случается раз в локальные сутки. `backup.run_daily` в
+    обычный тик не трогает даже диск: файл сегодняшнего дня уже на месте.
     """
     moment = now or tu.now_utc()
     await send_due_reminders(bot, session, moment)
     await digest.send_pending(bot, session, moment)
     await panel.refresh_stale(bot, session, moment)
+    # Последним: сорвавшийся снимок не должен задержать напоминания. Ни сессия,
+    # ни `bot` бэкапу не нужны — он работает с движком напрямую
+    await backup.run_daily(moment)
 
 
 async def send_due_reminders(

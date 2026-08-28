@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     panel_max_messages: int = 20
     panel_debounce_seconds: float = 2.0
 
+    # Ежедневный бэкап (этап 6): сколько копий держать в `data/backups/`.
+    # 0 = ежедневный снимок выключен, но `/backup` работает — он в каталог
+    # не заглядывает вовсе
+    backup_keep: int = 7
+
     openrouter_key: str = ""
     openrouter_model: str = ""
 

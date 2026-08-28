@@ -184,6 +184,21 @@ async def entries_by_kind(
     return list(result), int(total or 0)
 
 
+async def all_entries(session: AsyncSession, family_id: int) -> list[Entry]:
+    """Все записи семьи — под выгрузку (этап 6). Со сроком по времени, затем без.
+
+    Потолка нет намеренно, в отличие от всех остальных выборок: выгрузка едет
+    файлом, а не сообщением, и обрезанный экспорт хуже большого — по нему уже
+    ничего не восстановишь.
+    """
+    result = await session.scalars(
+        select(Entry)
+        .where(Entry.family_id == family_id)
+        .order_by(Entry.due_at.is_(None), Entry.due_at, Entry.created_at)
+    )
+    return list(result)
+
+
 SEARCH_LIMIT = 20
 
 

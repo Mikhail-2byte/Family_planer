@@ -160,9 +160,16 @@ class FakeMessage:
         self.text = text
         self.chat = SimpleNamespace(id=chat_id, type=chat_type)
         self.replies: list[tuple[str, dict]] = []
+        # Файлы, ушедшие в чат (этап 6): у `/backup` и `/export` это
+        # единственный видимый результат
+        self.documents: list[tuple[object, dict]] = []
 
     async def answer(self, text: str, **kwargs):
         self.replies.append((text, kwargs))
+        return None
+
+    async def answer_document(self, document, **kwargs):
+        self.documents.append((document, kwargs))
         return None
 
     @property

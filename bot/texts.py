@@ -36,6 +36,8 @@ COMMANDS = [
     ("remind", "Напомнить: /remind завтра в 19:00 позвонить маме"),
     ("family", "Кто в семье и сколько записал"),
     ("settings", "Таймзона и время утренней сводки"),
+    ("export", "Выгрузить записи в Markdown и CSV"),
+    ("backup", "Прислать файл базы"),
     ("cancel", "Прервать мастер /new"),
     ("ping", "Проверить, жив ли бот"),
 ]
@@ -716,3 +718,43 @@ SHOPPING_SUMMARY = "🛒 <b>{name}</b> — осталось: {count}. Откры
 
 def shopping_summary(name: str, count: int) -> str:
     return SHOPPING_SUMMARY.format(name=_escape(name), count=count)
+
+
+# --- Этап 6: бэкапы и экспорт ---
+
+# Здесь только то, что бот говорит в чат. Подписи колонок CSV и названия
+# разделов Markdown лежат в `services/export.py`: это содержимое файла, а не
+# сообщение, и HTML в нём быть не должно
+
+BACKUP_CAPTION = (
+    "Копия базы на {day}. Снята через <code>VACUUM INTO</code> — "
+    "открывается любым просмотрщиком SQLite."
+)
+BACKUP_FAILED = "Не смог снять копию базы. Подробности в логе бота."
+BACKUP_TOO_BIG = (
+    "База выросла до {size} МБ — Telegram столько от бота не примет. "
+    "Копии лежат в <code>data/backups/</code> на машине бота."
+)
+
+EXPORT_CAPTION = "Выгрузка на {day}: записей — {count}."
+EXPORT_TOO_BIG = (
+    "Выгрузка выросла до {size} МБ — Telegram столько от бота не примет. "
+    "Заберите базу целиком: /backup."
+)
+EXPORT_EMPTY = "Выгружать нечего: в семье пока ни одной записи."
+
+
+def backup_caption(day: date) -> str:
+    return BACKUP_CAPTION.format(day=day.isoformat())
+
+
+def backup_too_big(size_bytes: int) -> str:
+    return BACKUP_TOO_BIG.format(size=round(size_bytes / 1024 / 1024, 1))
+
+
+def export_too_big(size_bytes: int) -> str:
+    return EXPORT_TOO_BIG.format(size=round(size_bytes / 1024 / 1024, 1))
+
+
+def export_caption(day: date, count: int) -> str:
+    return EXPORT_CAPTION.format(day=day.isoformat(), count=count)
