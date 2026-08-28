@@ -102,7 +102,10 @@ async def _render_page(
     session: AsyncSession, family: Family, view: str, offset: int
 ) -> tuple[str, object]:
     kind = "task" if view == "tasks" else "note"
-    status = "open" if view == "tasks" else None
+    # У заметок статус фильтруется с тех пор, как у них появилась кнопка
+    # закрытия: иначе закрытая заметка оставалась бы в списке с мёртвой кнопкой
+    # («уже закрыта» на каждый тап) и список бы не разгружался
+    status = "open"
     entries, total = await repo.entries_by_kind(
         session, family.id, kind, status=status, limit=PAGE_SIZE, offset=offset
     )
@@ -183,11 +186,20 @@ async def mark_done(
         await call.answer(texts.DONE_ALREADY, show_alert=True)
         return
 
-    await call.answer(texts.DONE_CONFIRMED.format(title=entry.title[:60]))
+    # Вид берём из типа закрытой записи, а не из `callback_data`. Поле там
+    # завести было нельзя: у кнопок, уже висящих в чате, callback_data вида
+    # `done:42:0`, и лишнее поле сделало бы их неразбираемыми — тап по старому
+    # списку молча перестал бы работать
+    view = "notes" if entry.kind == "note" else "tasks"
+    await call.answer(
+        (texts.NOTE_CLOSED if view == "notes" else texts.DONE_CONFIRMED).format(
+            title=entry.title[:60]
+        )
+    )
     # Раньше перерисовки списка: запись уже закрыта в базе, и сбой рендера
     # страницы не должен оставить панель со сделанной задачей
     panel.schedule(bot, family.id, call.message.message_id)
-    text, markup = await _render_page(session, family, "tasks", callback_data.offset)
+    text, markup = await _render_page(session, family, view, callback_data.offset)
     await edit_or_ignore(call, text, markup)
 
 
@@ -216,12 +228,6 @@ async def cmd_find(
         # Иначе заголовок «Найдено: 20» выглядит как точное число совпадений
         blocks.append(texts.SEARCH_TRUNCATED.format(limit=repo.SEARCH_LIMIT))
     await message.answer("\n".join(blocks), reply_markup=kb.main_keyboard())
-
-
-@router.message(F.text == kb.BTN_BUY)
-async def buy_not_ready(message: Message) -> None:
-    """Кнопка стоит на клавиатуре с этапа 1, а списки будут на этапе 4."""
-    await message.answer(texts.SOON_SHOPPING, reply_markup=kb.main_keyboard())
 
 
 @router.message(Command("family"))

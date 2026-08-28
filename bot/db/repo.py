@@ -231,6 +231,39 @@ async def complete_entry(
     return entry
 
 
+async def reschedule_entry(
+    session: AsyncSession, entry_id: int, family_id: int, due_at: datetime
+) -> Entry | None:
+    """Перенести запись на другой срок. Контракт — как у `complete_entry`.
+
+    Отдельная функция, а не флаг у `complete_entry`: та закрывает необратимо, и
+    на её «уже закрыта → None» держится `DONE_ALREADY` в `/tasks`. Три причины
+    вернуть `None` — нет записи, чужая семья, уже закрыта — неразличимы
+    намеренно: звонящему во всех трёх случаях говорить одно и то же.
+
+    Единственное место в проекте, меняющее `due_at` уже сохранённой записи.
+    """
+    entry = await session.get(Entry, entry_id)
+    if entry is None or entry.family_id != family_id or entry.status != "open":
+        return None
+    entry.due_at = due_at
+    await session.commit()
+    await session.refresh(entry)
+    return entry
+
+
+async def entry_reminders(session: AsyncSession, entry_id: int) -> list[Reminder]:
+    """Живые напоминания записи: активные и ещё не отработавшие."""
+    result = await session.scalars(
+        select(Reminder).where(
+            Reminder.entry_id == entry_id,
+            Reminder.active.is_(True),
+            Reminder.sent_at.is_(None),
+        )
+    )
+    return list(result)
+
+
 async def entry_counts_by_author(
     session: AsyncSession, family_id: int
 ) -> dict[int, int]:
@@ -323,6 +356,21 @@ async def set_last_digest_on(
     await session.commit()
 
 
+async def set_family_settings(
+    session: AsyncSession,
+    family: Family,
+    *,
+    tz: str | None = None,
+    digest_time: str | None = None,
+) -> None:
+    """Настройки семьи из `/settings` (шаг 3b.6). Меняется по одной за раз."""
+    if tz is not None:
+        family.tz = tz
+    if digest_time is not None:
+        family.digest_time = digest_time
+    await session.commit()
+
+
 async def set_panel(
     session: AsyncSession,
     family: Family,
@@ -393,5 +441,235 @@ async def migrate_family_chat_id(
     # Панель жила в старом чате, и её message_id в новом уже не наш
     family.panel_message_id = None
     family.panel_day = None
+    # То же и с панелями списков покупок (этап 4): править сообщение по мёртвому
+    # id значит на каждый тап получать «message to edit not found»
+    await session.execute(
+        update(ListModel)
+        .where(ListModel.family_id == family.id)
+        .values(panel_message_id=None)
+    )
     await session.commit()
     return True
+
+
+# --- Списки покупок (этап 4) --------------------------------------------------
+
+# Список в интерфейсе один. Схема допускает несколько (`lists.name`) и второй
+# вид (`kind='checklist'`), но и то и другое остаётся заделом: пока семье
+# хватает одного «Покупки», выбор списка — лишний тап на каждое действие.
+DEFAULT_LIST_NAME = "Покупки"
+
+
+async def active_list(session: AsyncSession, family_id: int) -> ListModel | None:
+    """Открытый список покупок семьи. Закрытые (archived) сюда не попадают."""
+    return await session.scalar(
+        select(ListModel)
+        .where(
+            ListModel.family_id == family_id,
+            ListModel.kind == "shopping",
+            ListModel.archived.is_(False),
+        )
+        .order_by(ListModel.id.desc())
+    )
+
+
+async def get_or_create_active_list(
+    session: AsyncSession, family_id: int, name: str = DEFAULT_LIST_NAME
+) -> ListModel:
+    """Список заводится сам по первому обращению — как семья и участники (0.7)."""
+    existing = await active_list(session, family_id)
+    if existing is not None:
+        return existing
+    lst = ListModel(family_id=family_id, name=name, kind="shopping")
+    session.add(lst)
+    await session.commit()
+    await session.refresh(lst)
+    return lst
+
+
+async def closed_list_with_leftovers(
+    session: AsyncSession, family_id: int
+) -> ListModel | None:
+    """Свежий закрытый список, в котором остались непокупленные пункты.
+
+    Нужен, чтобы закрытый список не пропадал бесследно: `/buy` показывает его с
+    кнопкой «вернуть в работу». Без этого пункты, до которых не дошли руки,
+    становятся недостижимы — из кнопки список не открыть, а тап по старой
+    панели его не оживит (оживляет только снятая галка, а её там нет).
+    """
+    return await session.scalar(
+        select(ListModel)
+        .join(Entry, Entry.list_id == ListModel.id)
+        .where(
+            ListModel.family_id == family_id,
+            ListModel.kind == "shopping",
+            ListModel.archived.is_(True),
+            Entry.status == "open",
+        )
+        .order_by(ListModel.id.desc())
+        .limit(1)
+    )
+
+
+async def shopping_slot(session: AsyncSession, family_id: int) -> tuple[int, int]:
+    """`list_id` и `position` для новой покупки, заведённой не через `/buy`.
+
+    Покупка обязана попасть в список, откуда бы она ни пришла — из мастера
+    `/new` или из разбора «+». Иначе она не видна нигде: `/buy` смотрит на
+    `list_id`, день и «Просрочено» — на `due_at` (а его у покупки чаще нет),
+    `/tasks` и `/notes` — на `kind`. Такая запись находилась только через
+    `/find`, то есть терялась сразу после «Записал.».
+
+    Закрытый список для этого не оживляем: новая покупка начинает новый список,
+    а старый остаётся закрытым — так и задумано.
+    """
+    lst = await get_or_create_active_list(session, family_id)
+    last = await session.scalar(
+        select(func.max(Entry.position)).where(Entry.list_id == lst.id)
+    )
+    return lst.id, (last or 0) + 1
+
+
+async def list_items(session: AsyncSession, list_id: int) -> list[Entry]:
+    """Пункты списка в порядке добавления.
+
+    Сортировка по `position`, а `id` — тай-брейк: `position` заполняем мы сами,
+    и при гонке двух добавлений два пункта могут получить одинаковый номер.
+    Без второго ключа их порядок между перерисовками плавал бы, а вместе с ним
+    поехала бы и нумерация кнопок.
+    """
+    result = await session.scalars(
+        select(Entry)
+        .where(Entry.list_id == list_id)
+        .order_by(Entry.position, Entry.id)
+    )
+    return list(result)
+
+
+async def add_items(
+    session: AsyncSession,
+    *,
+    family_id: int,
+    author_id: int,
+    list_id: int,
+    titles: list[str],
+) -> list[Entry]:
+    """Добавить пункты в конец списка.
+
+    Срок (`due_at`) пунктам не ставится намеренно: на нём держится то, что
+    список не протекает в `/today`, `/week`, дайджест и панель дня — все они
+    выбирают записи по непустому `due_at`.
+    """
+    last = await session.scalar(
+        select(func.max(Entry.position)).where(Entry.list_id == list_id)
+    )
+    position = (last or 0) + 1
+    created = []
+    for title in titles:
+        created.append(
+            await create_entry(
+                session,
+                family_id=family_id,
+                author_id=author_id,
+                kind="shopping",
+                title=title,
+                list_id=list_id,
+                position=position,
+            )
+        )
+        position += 1
+    return created
+
+
+async def toggle_bought(
+    session: AsyncSession, entry_id: int, family_id: int, member_id: int
+) -> Entry | None:
+    """Переключить «куплено» у пункта списка. Чужую семью не трогает.
+
+    Отдельно от `complete_entry`, а не флагом к ней: та закрывает необратимо
+    («уже закрыта» → `None`), и на этом держится `DONE_ALREADY` в `/tasks`.
+    Здесь наоборот — повторный тап обязан снимать галку, иначе промах пальцем в
+    магазине не откатить.
+
+    Снятие обнуляет `done_at` и `done_by`: иначе «купила Аня» осталось бы
+    висеть на пункте, который никто не покупал.
+    """
+    entry = await session.get(Entry, entry_id)
+    if entry is None or entry.family_id != family_id or entry.list_id is None:
+        return None
+    if entry.status == "open":
+        entry.status = "done"
+        entry.done_at = now_utc()
+        entry.done_by = member_id
+    else:
+        entry.status = "open"
+        entry.done_at = None
+        entry.done_by = None
+    await session.commit()
+    await session.refresh(entry)
+    return entry
+
+
+async def sync_list_archived(session: AsyncSession, lst: ListModel) -> bool:
+    """Закрыть список, если в нём не осталось открытых пунктов.
+
+    **Только в одну сторону** — закрывает, но никогда не открывает. Обратный ход
+    делает `reopen_list`, и только когда тап снял галку. Симметричный пересчёт
+    выглядел проще, но стирал явное закрытие: список, закрытый кнопкой с
+    недокупленным остатком, оживал от первого же тапа по этому остатку, и
+    кнопка «Список закрыт» не значила ничего.
+
+    Пустой список закрытым не считается — иначе только что созданный сразу
+    уезжал бы в архив.
+    """
+    if lst.archived:
+        return True
+    total = await session.scalar(
+        select(func.count()).select_from(Entry).where(Entry.list_id == lst.id)
+    )
+    open_left = await session.scalar(
+        select(func.count())
+        .select_from(Entry)
+        .where(Entry.list_id == lst.id, Entry.status == "open")
+    )
+    if total and not open_left:
+        lst.archived = True
+        await session.commit()
+    return lst.archived
+
+
+async def reopen_list(session: AsyncSession, lst: ListModel) -> None:
+    """Вернуть список в работу: снятая галка отменяет промах пальцем.
+
+    Зовётся ровно из одного места — тапа, который перевёл пункт в «открыт».
+    Тап в другую сторону (купили ещё один) закрытый список не оживляет: человек
+    закрыл его сознательно.
+    """
+    if lst.archived:
+        lst.archived = False
+        await session.commit()
+
+
+async def close_list(session: AsyncSession, lst: ListModel) -> None:
+    """Закрыть список явно, не вычёркивая остаток («сметаны не было»)."""
+    if not lst.archived:
+        lst.archived = True
+        await session.commit()
+
+
+async def set_list_panel(
+    session: AsyncSession, lst: ListModel, message_id: int | None
+) -> None:
+    """Запомнить сообщение панели списка — она переживает перезапуск бота."""
+    lst.panel_message_id = message_id
+    await session.commit()
+
+
+async def list_with_panel(
+    session: AsyncSession, family_id: int, list_id: int
+) -> ListModel | None:
+    """Список по id с проверкой семьи — для колбэков из чата."""
+    lst = await session.get(ListModel, list_id)
+    if lst is None or lst.family_id != family_id:
+        return None
+    return lst

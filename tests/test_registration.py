@@ -169,7 +169,7 @@ async def test_group_routers_never_run_in_private():
     его хендлеры молча уйдут в отказ, и найти это будет нечем."""
     from aiogram.types import Chat, Message
 
-    from bot.handlers import capture, new_entry, remind, views
+    from bot.handlers import capture, lists, new_entry, remind, views
 
     message = Message(
         message_id=1,
@@ -177,6 +177,6 @@ async def test_group_routers_never_run_in_private():
         chat=Chat(id=555, type="private"),
         text="/new",
     )
-    for module in (views, remind, new_entry, capture):
+    for module in (views, lists, remind, new_entry, capture):
         passed, _ = await module.router.message.check_root_filters(message)
         assert not passed, module.__name__

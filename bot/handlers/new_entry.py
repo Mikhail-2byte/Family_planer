@@ -23,6 +23,7 @@ from bot import texts
 from bot.db import repo
 from bot.db.models import Family, Member
 from bot.filters import IN_GROUP, IN_GROUP_CB
+from bot.handlers import lists
 from bot.services import panel
 from bot.services import timeutil as tu
 
@@ -159,7 +160,7 @@ async def pick_day(
         return
     if choice == "none":
         await call.message.delete()
-        await _save(call.message, state, session, family, member)
+        await _save(call.message, state, session, family, member, bot)
         panel.schedule(bot, family.id, call.message.message_id)
         await call.answer()
         return
@@ -228,7 +229,7 @@ async def pick_remind(
     if choice != "none":
         await state.update_data(remind_before=int(choice))
     await call.message.delete()
-    await _save(call.message, state, session, family, member)
+    await _save(call.message, state, session, family, member, bot)
     # Не внутри `_save`: у него нет `bot`, а тесты зовут его напрямую
     panel.schedule(bot, family.id, call.message.message_id)
     await call.answer()
@@ -274,6 +275,7 @@ async def _save(
     session: AsyncSession,
     family: Family,
     member: Member,
+    bot: Bot,
 ) -> None:
     data = await state.get_data()
     await state.clear()
@@ -294,14 +296,25 @@ async def _save(
             else due_at
         )
 
+    kind = data.get("kind", "task")
+    # Покупка обязана попасть в список, откуда бы ни пришла: иначе её не видно
+    # нигде — `/buy` смотрит на `list_id`, день и «Просрочено» на `due_at`
+    # (а его у покупки чаще нет), `/tasks` и `/notes` на `kind`. Такая запись
+    # находилась только через `/find`, то есть терялась сразу после «Записал.»
+    list_id = position = None
+    if kind == "shopping":
+        list_id, position = await repo.shopping_slot(session, family.id)
+
     entry = await repo.create_entry(
         session,
         family_id=family.id,
         author_id=member.id,
-        kind=data.get("kind", "task"),
+        kind=kind,
         title=data.get("title", "Без названия"),
         due_at=due_at,
         all_day=all_day,
+        list_id=list_id,
+        position=position,
         source_chat_id=message.chat.id,
     )
 
@@ -329,3 +342,7 @@ async def _save(
     if warning:
         blocks.append(warning)
     await message.answer("\n\n".join(blocks), reply_markup=kb.main_keyboard())
+    if kind == "shopping":
+        # Тот же долг, что и у разбора «+»: пункт лёг в список, и живая панель
+        # обязана это показать, а не ждать тапа или `/buy`
+        await lists.refresh_panel(bot, session, family, message)

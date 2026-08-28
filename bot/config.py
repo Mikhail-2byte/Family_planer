@@ -28,11 +28,29 @@ class Settings(BaseSettings):
 
     openrouter_key: str = ""
     openrouter_model: str = ""
-    openrouter_model_cheap: str = ""
+
+    # Порог автосохранения разбора без карточки подтверждения (шаг 3b.6).
+    # 0 = выключено, и это значение по умолчанию: инвариант «ничего не
+    # сохраняется молча» снимается только осознанно, когда по `parse.log`
+    # станет видно, что модель на высокой уверенности не ошибается
+    autosave_confidence: float = 0.0
+
+    # Расшифровка голосовых (этап 5). Отдельный вендор и отдельный ключ:
+    # Whisper-совместимый эндпоинт Groq принимает ogg/opus Telegram как есть,
+    # поэтому ffmpeg проекту не нужен, а его суточная квота не пересекается
+    # с лимитом OpenRouter, на котором держится текстовый разбор
+    stt_key: str = ""
+    stt_model: str = "whisper-large-v3-turbo"
+    stt_url: str = "https://api.groq.com/openai/v1/audio/transcriptions"
+
+    # Потолок длины голосового и срок жизни приглашения по кнопке «🎤 Голосом»
+    voice_max_seconds: int = 120
+    voice_window_seconds: int = 300
 
     # Пустое значение = работаем напрямую, без прокси
     telegram_proxy: str = ""
     openrouter_proxy: str = ""
+    stt_proxy: str = ""
 
     @property
     def db_url(self) -> str:

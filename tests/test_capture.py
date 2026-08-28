@@ -108,13 +108,13 @@ def _item(title="Купить молоко", **fields):
 
 
 @pytest_asyncio.fixture
-async def carded(session, family, anya, answer):
+async def carded(session, family, anya, answer, bot):
     """Прогон до карточки: возвращает (исходное сообщение, карточка)."""
 
-    async def show(reply, message_id: int = 500):
+    async def show(reply, message_id: int = 500, text: str = "купить молоко"):
         answer(reply)
         message = FakeMessage(chat_id=family.chat_id, message_id=message_id)
-        await capture.capture(message, "купить молоко", session, family)
+        await capture.capture(message, text, session, family, anya, bot)
         return message, message.cards[0] if message.cards else None
 
     return show
@@ -160,14 +160,20 @@ async def test_create_without_items_offers_the_wizard(carded):
 
 
 @pytest.mark.asyncio
-async def test_card_shows_parse_and_two_buttons(carded):
+async def test_card_shows_parse_and_all_buttons(carded):
     message, card = await carded(_reply(_item(due_at=_in(4))))
     text, kwargs = message.replies[0]
 
     assert texts.CAPTURE_ASK in text
     assert "Купить молоко" in text
-    buttons = kwargs["reply_markup"].inline_keyboard[0]
-    assert [b.text for b in buttons] == [kb.BTN_SAVE, kb.BTN_CANCEL]
+    rows = kwargs["reply_markup"].inline_keyboard
+    # Ряд правки (шаг 3b.3–3b.5) идёт первым, решающие кнопки — под ним
+    assert [b.text for b in rows[0]] == [
+        kb.BTN_EDIT_DATE,
+        kb.BTN_EDIT_KIND,
+        kb.BTN_EDIT_TEXT,
+    ]
+    assert [b.text for b in rows[1]] == [kb.BTN_SAVE, kb.BTN_CANCEL]
     assert (message.chat.id, card.message_id) in capture._drafts
 
 
@@ -187,9 +193,11 @@ async def test_low_confidence_is_flagged_in_the_card(carded):
 
 
 @pytest.mark.asyncio
-async def test_prompt_carries_family_context(session, family, anya, answer):
+async def test_prompt_carries_family_context(session, family, anya, answer, bot):
     calls = answer(_reply(intent="chitchat"))
-    await capture.capture(FakeMessage(), "купить молоко", session, family)
+    await capture.capture(
+        FakeMessage(), "купить молоко", session, family, anya, bot
+    )
 
     system, user = calls[0]
     assert "Аня" in system  # имена участников

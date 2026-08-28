@@ -21,14 +21,27 @@ RETRY = "retry"  # сеть или флуд-контроль — попробу�
 NOT_FOUND = "not_found"  # сообщения больше нет — править нечего, нужно новое
 
 
-async def send(bot: Bot, family: Family, text: str, *, silent: bool = False) -> tuple[str, int | None]:
+async def send(
+    bot: Bot,
+    family: Family,
+    text: str,
+    *,
+    silent: bool = False,
+    reply_markup=None,
+) -> tuple[str, int | None]:
     """Отправить сообщение в чат семьи. Исключений наружу не выпускает.
 
     Отдаёт ещё и `message_id`: панели он нужен, чтобы потом её редактировать.
+
+    `reply_markup` появился ради разбора незакрытого (этап 5п): фоновые
+    сообщения кнопок раньше не знали вовсе — их принимал только `edit`.
     """
     try:
         message = await bot.send_message(
-            family.chat_id, text, disable_notification=silent
+            family.chat_id,
+            text,
+            disable_notification=silent,
+            reply_markup=reply_markup,
         )
         return OK, message.message_id
     except TelegramForbiddenError:
@@ -48,13 +61,15 @@ async def send(bot: Bot, family: Family, text: str, *, silent: bool = False) -> 
         return RETRY, None
 
 
-async def deliver(bot: Bot, family: Family, text: str) -> str:
+async def deliver(bot: Bot, family: Family, text: str, *, reply_markup=None) -> str:
     """То же, что `send`, но без `message_id` — тикеру и дайджесту он не нужен."""
-    status, _ = await send(bot, family, text)
+    status, _ = await send(bot, family, text, reply_markup=reply_markup)
     return status
 
 
-async def edit(bot: Bot, family: Family, message_id: int, text: str) -> str:
+async def edit(
+    bot: Bot, family: Family, message_id: int, text: str, reply_markup=None
+) -> str:
     """Перерисовать сообщение в чате семьи. Исключений наружу не выпускает.
 
     Фоновый двойник `views.edit_or_ignore`: тот работает от `CallbackQuery` и
@@ -64,7 +79,12 @@ async def edit(bot: Bot, family: Family, message_id: int, text: str) -> str:
     выпускать новую.
     """
     try:
-        await bot.edit_message_text(text, chat_id=family.chat_id, message_id=message_id)
+        await bot.edit_message_text(
+            text,
+            chat_id=family.chat_id,
+            message_id=message_id,
+            reply_markup=reply_markup,
+        )
         return OK
     except TelegramForbiddenError:
         log.warning("Нет доступа в чат %s", family.chat_id)

@@ -8,7 +8,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bot.db import repo
 from bot.db.models import Base
-from bot.services import panel
+from bot.services import panel, parse_log
+
+
+@pytest.fixture(autouse=True)
+def _parse_log(tmp_path, monkeypatch):
+    """Лог разбора на время теста уводится в tmp.
+
+    Иначе прогон дописывает сотни строк в боевой `data/parse.log`, а по нему
+    считается стоимость этапа 3b.8 — тестовые вызовы завысили бы её вдвое.
+    """
+    monkeypatch.setattr(parse_log, "PATH", tmp_path / "parse.log")
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -71,15 +81,22 @@ class FakeBot:
     правки не срывает остальные; ключ — порядковый номер вызова.
     """
 
-    def __init__(self, fail_on=None, fail_on_edit=None, fail_on_pin=None):
+    def __init__(
+        self, fail_on=None, fail_on_edit=None, fail_on_pin=None, download_error=None
+    ):
         self.sent: list[tuple[int, str]] = []
         self.kwargs: list[dict] = []  # чем сопровождалась отправка (reply_markup)
         self.edited: list[tuple[int, int, str]] = []  # chat_id, message_id, текст
+        self.edit_kwargs: list[dict] = []  # чем сопровождалась правка (reply_markup)
         self.pinned: list[int] = []
         self.unpinned: list[int] = []
         self._fail_on = fail_on or {}
         self._fail_on_edit = fail_on_edit or {}
         self._fail_on_pin = fail_on_pin or {}
+        # Скачивание голосового (этап 5): что отдать и чем упасть
+        self.downloaded: list[object] = []
+        self.voice_bytes = b"OggS\x00fake"
+        self._download_error = download_error
         # message_id последовательны, как в настоящем чате: на этом держится
         # подсчёт «на сколько сообщений уехала панель»
         self._next_id = 100
@@ -97,6 +114,7 @@ class FakeBot:
     async def edit_message_text(self, text: str, chat_id=None, message_id=None, **kwargs):
         error = self._fail_on_edit.get(len(self.edited))
         self.edited.append((chat_id, message_id, text))
+        self.edit_kwargs.append(kwargs)
         if error is not None:
             raise error
         return None
@@ -111,6 +129,14 @@ class FakeBot:
     async def unpin_chat_message(self, chat_id: int, message_id=None, **kwargs):
         self.unpinned.append(message_id)
         return None
+
+    async def download(self, file, destination=None, **kwargs):
+        self.downloaded.append(file)
+        if self._download_error is not None:
+            raise self._download_error
+        if destination is not None:
+            destination.write(self.voice_bytes)
+        return destination
 
     @property
     def texts(self) -> list[str]:

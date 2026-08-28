@@ -13,6 +13,7 @@ from bot.handlers import new_entry
 from bot.handlers.new_entry import ALLDAY_ANCHOR, _parse_day, _save
 from bot.middlewares import drop_wizard_state
 from bot.services import timeutil as tu
+from tests.conftest import FakeBot
 
 TODAY = date(2026, 8, 27)
 MSK = "Europe/Moscow"
@@ -70,7 +71,9 @@ class FakeMessage:
 
 async def _save_with(session, family, anya, **data):
     message = FakeMessage()
-    await _save(message, FakeState(**data), session, family, anya)
+    # `bot` мастеру нужен только ради панели списка на покупке (4.5);
+    # здесь виды другие, но аргумент обязателен
+    await _save(message, FakeState(**data), session, family, anya, FakeBot())
     return message.replies
 
 
@@ -284,3 +287,24 @@ def test_state_drop_hangs_on_every_router_but_the_wizard():
     for module in (admin, views, remind):
         assert drop_wizard_state in module.router.message.middleware
     assert drop_wizard_state not in new_entry.router.message.middleware
+
+
+@pytest.mark.asyncio
+async def test_wizard_shopping_refreshes_the_list_panel(session, family, anya, bot):
+    """Тот же долг у мастера: покупка легла в список — панель обязана ожить."""
+    lst = await repo.get_or_create_active_list(session, family.id)
+    await repo.set_list_panel(session, lst, 100)
+
+    message = FakeMessage()
+    await _save(
+        message,
+        FakeState(kind="shopping", title="Сыр"),
+        session,
+        family,
+        anya,
+        bot,
+    )
+
+    assert bot.edited, "панель списка не тронута"
+    assert bot.edited[-1][1] == 100
+    assert "Сыр" in bot.edited[-1][2]

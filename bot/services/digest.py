@@ -11,11 +11,12 @@ from datetime import date, datetime
 from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot import keyboards as kb
 from bot import texts
 from bot.config import settings
 from bot.db import repo
 from bot.db.models import Family
-from bot.services import sending
+from bot.services import review, sending
 from bot.services import timeutil as tu
 
 log = logging.getLogger(__name__)
@@ -61,6 +62,24 @@ async def build_day(
     blocks.append(
         texts.day_header(today, family.tz, moment) + "\n" + (body or texts.EMPTY_TODAY)
     )
+
+    # Короткая сводка по покупкам (`PLAN.md`, «Утренний дайджест»). Именно
+    # счётчик, а не список: пункты покупок не привязаны ко дню, и вываливать
+    # тридцать строк в каждый `/today` незачем — за ними есть своя панель.
+    #
+    # На `has_content` она намеренно не влияет. Иначе утренняя сводка уходила бы
+    # каждый день, пока в списке лежит хоть один непокупленный пункт, и «день
+    # пуст» перестало бы означать «сегодня ничего нет».
+    lst = await repo.active_list(session, family.id)
+    if lst is not None:
+        left = sum(
+            1
+            for item in await repo.list_items(session, lst.id)
+            if item.status == "open"
+        )
+        if left:
+            blocks.append(texts.shopping_summary(lst.name, left))
+
     return "\n\n".join(blocks), bool(entries or overdue)
 
 
@@ -105,10 +124,29 @@ async def _send_one(
         blocks.append(text)
         if await sending.deliver(bot, family, "\n\n".join(blocks)) == sending.RETRY:
             return  # сеть или флуд — попробуем на следующем тике
+        if await _send_review(bot, session, family, now) == sending.RETRY:
+            return  # день не помечаем: на следующем тике уйдут оба сообщения
 
     # Отметка ставится и на пустом дне: иначе каждый тик до полуночи будет
     # заново собирать сводку, которую всё равно не отправит
     await repo.set_last_digest_on(session, family, today)
+
+
+async def _send_review(
+    bot: Bot, session: AsyncSession, family: Family, now: datetime
+) -> str:
+    """Разбор незакрытого вторым сообщением — только если есть что разбирать.
+
+    Молчание на пустом списке важнее краткости: «разбирать нечего» каждое утро
+    — это шум, от которого сводку начинают пролистывать не читая.
+    """
+    entries = await review.overdue(session, family, now)
+    text, shown = review.render(entries, family.tz, now)
+    if not shown:
+        return sending.OK  # разбирать нечего — молчим
+    return await sending.deliver(
+        bot, family, text, reply_markup=kb.review_keyboard(shown)
+    )
 
 
 def _is_late(family: Family, today: date, now: datetime) -> bool:

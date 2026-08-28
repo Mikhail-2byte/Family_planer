@@ -35,8 +35,12 @@ class Family(Base):
     tz: Mapped[str] = mapped_column(String(64), default="Europe/Moscow")
     digest_time: Mapped[str] = mapped_column(String(5), default="08:00")
     last_digest_on: Mapped[date | None] = mapped_column(Date)
-    # 'trigger' — реагировать только на команды/reply/@mention/префикс '+'
-    # 'all'     — гнать каждое сообщение в LLM на триаж
+    # Колонка мёртвая: второй режим ('all' — гнать каждое сообщение в LLM на
+    # триаж) отменён 28.08.2026, значение всегда 'trigger'. Не удалена потому,
+    # что в SQLite это пересборка таблицы `families` на боевой базе — той самой,
+    # где переезд в супергруппу уже стоил потерянного апдейта, — ради нуля
+    # функциональной выгоды. Снять поле только с модели нельзя: тесты строят
+    # схему через `create_all`, и `revision --autogenerate` перестал бы быть пустым
     listen_mode: Mapped[str] = mapped_column(String(16), default="trigger")
     panel_message_id: Mapped[int | None] = mapped_column(Integer)
     # Локальный день, за который выпущена панель. Именно день, а не момент:
@@ -66,6 +70,11 @@ class ListModel(Base):
     name: Mapped[str] = mapped_column(String(255))
     kind: Mapped[str] = mapped_column(String(16), default="shopping")
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Живая панель списка (этап 4). Своя, а не `families.panel_message_id`:
+    # та занята панелью дня, и обе висят в чате одновременно.
+    # Близнеца `panel_day` тут нет намеренно — у списка покупок нет понятия
+    # «устарел за сутки», перевыпуск ему нужен, только когда он уехал вверх
+    panel_message_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

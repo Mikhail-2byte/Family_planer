@@ -1,6 +1,7 @@
 """Запросы к записям и рендер строк — этап 1.3 и 1.5."""
 
 from datetime import datetime, time, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -377,3 +378,106 @@ async def test_week_cut_drops_the_tail_not_the_middle(session, family, anya):
     assert text.count("пн ") == 20
     assert text.count("вс ") == 10
     assert texts.MORE_ITEMS.format(count=10) in text
+
+
+# --- Закрытие заметок ---------------------------------------------------------
+#
+# До этой правки закрыть можно было только задачу: кнопка «Готово» рисовалась
+# при `view == "tasks"`, а `/notes` вдобавок показывал записи любого статуса.
+# Заметки копились вечно, а заметка с прошедшим сроком навсегда оседала в блоке
+# «Просрочено» утренней сводки — убрать её можно было только руками в базе.
+
+
+class _DoneCall:
+    """Колбэк с `edit_text`: `FakeMessage` из conftest его не умеет."""
+
+    def __init__(self, chat_id: int):
+        self.answers: list[str] = []
+        self.edits: list[str] = []
+        self.message = SimpleNamespace(
+            message_id=500,
+            chat=SimpleNamespace(id=chat_id, type="supergroup"),
+            edit_text=self._edit,
+        )
+
+    async def answer(self, text: str = "", show_alert: bool = False) -> None:
+        self.answers.append(text)
+
+    async def _edit(self, text: str, reply_markup=None) -> None:
+        self.edits.append(text)
+
+
+@pytest.mark.asyncio
+async def test_notes_page_offers_a_close_button(session, family, anya):
+    from bot.handlers.views import _render_page
+
+    await repo.create_entry(
+        session, family_id=family.id, author_id=anya.id, kind="note", title="идея"
+    )
+
+    _, markup = await _render_page(session, family, "notes", 0)
+    assert [b.text for b in markup.inline_keyboard[0]] == ["✅ 1"]
+
+
+@pytest.mark.asyncio
+async def test_closed_note_leaves_the_list_and_the_overdue_block(
+    session, family, anya, bot
+):
+    """Заметка с прошедшим сроком висела в «Просрочено» каждое утро вечно."""
+    from bot import keyboards as kb
+    from bot.handlers.views import _render_page, mark_done
+    from bot.services import digest
+
+    note = await repo.create_entry(
+        session,
+        family_id=family.id,
+        author_id=anya.id,
+        kind="note",
+        title="Полить цветы",
+        due_at=_msk(2026, 8, 27, 7),
+    )
+    now = _msk(2026, 8, 28, 9)
+    body, _ = await digest.build_day(session, family, now)
+    assert "Полить цветы" in body
+
+    call = _DoneCall(family.chat_id)
+    await mark_done(
+        call, kb.DoneCB(entry_id=note.id, offset=0), session, family, anya, bot
+    )
+
+    assert (await repo.get_entry(session, note.id)).status == "done"
+    body, _ = await digest.build_day(session, family, now)
+    assert "Полить цветы" not in body
+    text, markup = await _render_page(session, family, "notes", 0)
+    assert text == texts.EMPTY_NOTES and markup is None
+
+
+@pytest.mark.asyncio
+async def test_closing_a_note_redraws_notes_not_tasks(session, family, anya, bot):
+    """`mark_done` перерисовывал страницу жёстко как «tasks».
+
+    Вид приходится брать из типа записи: поле в `DoneCB` завести нельзя —
+    у кнопок, уже висящих в чате, callback_data вида `done:42:0`, и лишнее поле
+    сделало бы их неразбираемыми.
+    """
+    from bot import keyboards as kb
+    from bot.handlers.views import mark_done
+
+    await repo.create_entry(
+        session, family_id=family.id, author_id=anya.id, kind="task", title="ЗАДАЧА"
+    )
+    note = await repo.create_entry(
+        session, family_id=family.id, author_id=anya.id, kind="note", title="заметка"
+    )
+    other = await repo.create_entry(
+        session, family_id=family.id, author_id=anya.id, kind="note", title="вторая"
+    )
+
+    call = _DoneCall(family.chat_id)
+    await mark_done(
+        call, kb.DoneCB(entry_id=note.id, offset=0), session, family, anya, bot
+    )
+
+    assert call.answers == [texts.NOTE_CLOSED.format(title="заметка")]
+    assert "вторая" in call.edits[0]
+    assert "ЗАДАЧА" not in call.edits[0]
