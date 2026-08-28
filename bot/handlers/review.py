@@ -15,8 +15,8 @@
 уехало бы в модель отдельной фразой. Ровно та же причина, по которой раньше
 мастера стоит `settings`.
 
-Перенос — единственное место в проекте, меняющее `due_at` уже сохранённой
-записи (`repo.reschedule_entry`).
+Сам перенос живёт в `services/entries.py`: с этапа 7 он нужен и карточке
+записи, а забыть вместе с ним гашение разовых напоминаний слишком легко.
 """
 
 import logging
@@ -33,8 +33,8 @@ from bot.db.models import Entry, Family, Member
 from bot.filters import IN_GROUP, IN_GROUP_CB
 from bot.handlers.new_entry import ALLDAY_ANCHOR
 from bot.handlers.views import edit_or_ignore
+from bot.services import entries, panel, review, sending
 from bot.services import nlp_fallback as nlp
-from bot.services import panel, review, sending
 from bot.services import timeutil as tu
 
 router = Router()
@@ -67,8 +67,9 @@ async def _live_entry(
 
 async def _redraw(call: CallbackQuery, session: AsyncSession, family: Family) -> None:
     """Перерисовать список: он мог измениться от чужого тапа или от времени."""
-    entries = await review.overdue(session, family)
-    text, shown = review.render(entries, family.tz)
+    # Не `entries` — это имя занято модулем `services.entries`
+    overdue = await review.overdue(session, family)
+    text, shown = review.render(overdue, family.tz)
     await edit_or_ignore(call, text, kb.review_keyboard(shown))
 
 
@@ -135,7 +136,7 @@ async def tap(
     if action == "day":
         now = tu.now_utc()
         target = tu.local_today(family.tz, now) + timedelta(days=callback_data.value)
-        moved = await _move(session, entry, family, target)
+        moved = await entries.move(session, entry, family, target)
         if moved is None:
             await call.answer(texts.REVIEW_STALE, show_alert=True)
             await _redraw(call, session, family)
@@ -156,29 +157,6 @@ async def tap(
         note = await _remind(session, family, member, entry, callback_data.value, now)
     await call.answer(note or texts.review_moved(entry.title, _moved_to(entry, family, now)))
     await _redraw(call, session, family)
-
-
-async def _move(
-    session: AsyncSession, entry: Entry, family: Family, target
-) -> Entry | None:
-    """Перенести запись на другой день, сохранив время суток.
-
-    Именно через локальное время: сдвиг `timedelta` поверх UTC уехал бы на час
-    при переводе часов, а «завтра в 19:00» должно остаться в 19:00.
-    """
-    local = tu.to_local(entry.due_at, family.tz)
-    due_at = tu.to_utc(datetime.combine(target, local.time()), family.tz)
-    moved = await repo.reschedule_entry(session, entry.id, family.id, due_at)
-    if moved is None:
-        return None
-
-    # Старое напоминание выстрелило бы по прежнему `fire_at` — по сути в
-    # прошлое, то есть догонкой в ближайший тик. Повторяющиеся не трогаем:
-    # тихо убить серию хуже, чем оставить её как есть
-    for reminder in await repo.entry_reminders(session, entry.id):
-        if reminder.rrule is None:
-            await repo.deactivate_reminder(session, reminder)
-    return moved
 
 
 async def _remind(
@@ -236,7 +214,7 @@ async def take_day(
 
     # Берём только день: время суток у записи своё, и придуманное `dateparser`
     # «сейчас» (`capture` обходит это отдельно) сюда просто не попадает
-    moved = await _move(session, entry, family, parsed.when.date())
+    moved = await entries.move(session, entry, family, parsed.when.date())
     if moved is None:
         await message.reply(texts.REVIEW_STALE)
         return

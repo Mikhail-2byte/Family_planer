@@ -1,4 +1,4 @@
-"""Просмотр записей: /today /week /tasks /notes /find /family."""
+"""Просмотр записей: /today /week /tasks /notes /events /find /family."""
 
 from datetime import date, timedelta
 from itertools import groupby
@@ -98,10 +98,40 @@ async def cmd_week(message: Message, session: AsyncSession, family: Family) -> N
     await message.answer("\n\n".join(blocks), reply_markup=kb.main_keyboard())
 
 
+# Вид страницы ↔ тип записи. Таблицей, а не тернарниками: с приходом `/events`
+# ветвлений стало бы по три в каждой из трёх строк
+KIND_BY_VIEW = {"tasks": "task", "notes": "note", "events": "event"}
+VIEW_BY_KIND = {kind: view for view, kind in KIND_BY_VIEW.items()}
+HEADER_BY_VIEW = {
+    "tasks": texts.HEADER_TASKS,
+    "notes": texts.HEADER_NOTES,
+    "events": texts.HEADER_EVENTS,
+}
+EMPTY_BY_VIEW = {
+    "tasks": texts.EMPTY_TASKS,
+    "notes": texts.EMPTY_NOTES,
+    "events": texts.EMPTY_EVENTS,
+}
+
+
+def view_of(entry: Entry) -> str:
+    """На какую страницу возвращать после действия над записью.
+
+    Вид берётся из `entry.kind`, а не из `callback_data`, и завести там поле
+    нельзя: у кнопок, уже висящих в чате, `callback_data` вида `done:42:0`.
+    Функция общая для `mark_done` и карточки записи — две копии этой карты
+    разошлись бы на первом же новом типе.
+
+    Покупка сюда попасть не должна: своей страницы у неё нет, она живёт в
+    панели списка. Дефолт `tasks` — чтобы не падать, а показать хоть что-то.
+    """
+    return VIEW_BY_KIND.get(entry.kind, "tasks")
+
+
 async def _render_page(
     session: AsyncSession, family: Family, view: str, offset: int
 ) -> tuple[str, object]:
-    kind = "task" if view == "tasks" else "note"
+    kind = KIND_BY_VIEW.get(view, "task")
     # У заметок статус фильтруется с тех пор, как у них появилась кнопка
     # закрытия: иначе закрытая заметка оставалась бы в списке с мёртвой кнопкой
     # («уже закрыта» на каждый тап) и список бы не разгружался
@@ -120,11 +150,10 @@ async def _render_page(
         )
 
     if not entries:
-        empty = texts.EMPTY_TASKS if view == "tasks" else texts.EMPTY_NOTES
-        return empty, None
+        return EMPTY_BY_VIEW.get(view, texts.EMPTY_TASKS), None
 
     now = tu.now_utc()
-    header = (texts.HEADER_TASKS if view == "tasks" else texts.HEADER_NOTES).format(
+    header = HEADER_BY_VIEW.get(view, texts.HEADER_TASKS).format(
         shown=f"{offset + 1}–{offset + len(entries)}", total=total
     )
     numbered = "\n".join(
@@ -151,6 +180,23 @@ async def cmd_tasks(message: Message, session: AsyncSession, family: Family) -> 
 @router.message(F.text == kb.BTN_NOTES)
 async def cmd_notes(message: Message, session: AsyncSession, family: Family) -> None:
     text, markup = await _render_page(session, family, "notes", 0)
+    await message.answer(text, reply_markup=markup or kb.main_keyboard())
+
+
+@router.message(Command("events"))
+async def cmd_events(message: Message, session: AsyncSession, family: Family) -> None:
+    """События отдельной страницей (этап 7).
+
+    До неё событие было видно только в `/today`, `/week` и «Просрочено», а
+    поставить кнопки туда нельзя: день собирает `digest.build_day`, и нумерация
+    протекла бы в утреннюю сводку и в закреплённую панель. Из-за этого закрыть
+    непросроченное событие было нечем — кнопка «Готово» живёт только на такой
+    странице.
+
+    Кнопки в нижнюю клавиатуру не добавляем: там уже шесть подписей в трёх
+    рядах, седьмая ломает раскладку на телефоне.
+    """
+    text, markup = await _render_page(session, family, "events", 0)
     await message.answer(text, reply_markup=markup or kb.main_keyboard())
 
 
@@ -186,11 +232,10 @@ async def mark_done(
         await call.answer(texts.DONE_ALREADY, show_alert=True)
         return
 
-    # Вид берём из типа закрытой записи, а не из `callback_data`. Поле там
-    # завести было нельзя: у кнопок, уже висящих в чате, callback_data вида
-    # `done:42:0`, и лишнее поле сделало бы их неразбираемыми — тап по старому
-    # списку молча перестал бы работать
-    view = "notes" if entry.kind == "note" else "tasks"
+    # Вид берём из типа закрытой записи, а не из `callback_data` — почему
+    # именно так, сказано в `view_of`. С приходом `/events` тернарник здесь
+    # перерисовывал бы страницу событий как страницу задач
+    view = view_of(entry)
     await call.answer(
         (texts.NOTE_CLOSED if view == "notes" else texts.DONE_CONFIRMED).format(
             title=entry.title[:60]

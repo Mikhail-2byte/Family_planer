@@ -226,7 +226,19 @@ async def test_done_buttons_match_numbered_lines(session, family, anya, monkeypa
 
     text, markup = await views._render_page(session, family, "tasks", 0)
     assert "10. " in text
-    assert [b.text for b in markup.inline_keyboard[0]] == [f"✅ {i}" for i in range(1, 11)]
+
+    # Считаем по всем рядам, а не по индексу: с этапа 7 раскладка — ряд на
+    # запись, и привязка к `inline_keyboard[0]` проверяла бы форму, а не
+    # инвариант. Инвариант же прежний: номер на кнопке = номер строки в тексте
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert [b for b in labels if b.startswith("✅")] == [
+        f"✅ {i}" for i in range(1, 11)
+    ]
+    assert [b for b in labels if b.startswith("✏️")] == [
+        f"✏️ {i}" for i in range(1, 11)
+    ]
+    for i in range(1, 11):
+        assert f"{i}. " in text
 
 
 # --- Мастер: чужой тап получает ответ, а не вечный «часик» -------------------

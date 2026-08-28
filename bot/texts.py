@@ -31,6 +31,7 @@ COMMANDS = [
     ("week", "План на неделю"),
     ("tasks", "Открытые задачи"),
     ("notes", "Заметки"),
+    ("events", "События"),
     ("buy", "Список покупок"),
     ("find", "Поиск: /find молоко"),
     ("remind", "Напомнить: /remind завтра в 19:00 позвонить маме"),
@@ -61,12 +62,14 @@ EMPTY_TODAY = "На сегодня ничего не запланировано.
 EMPTY_WEEK = "На этой неделе ничего не запланировано."
 EMPTY_TASKS = "Открытых задач нет."
 EMPTY_NOTES = "Заметок пока нет."
+EMPTY_EVENTS = "Событий пока нет."
 EMPTY_SEARCH = "По запросу «{query}» ничего не нашлось."
 FIND_USAGE = "Как искать: <code>/find молоко</code>"
 
 HEADER_WEEK = "📅 <b>Неделя {start} — {end}</b>"
 HEADER_TASKS = "✅ <b>Задачи</b> ({shown} из {total})"
 HEADER_NOTES = "📝 <b>Заметки</b> ({shown} из {total})"
+HEADER_EVENTS = "📅 <b>События</b> ({shown} из {total})"
 HEADER_SEARCH = "🔎 <b>Найдено по «{query}»:</b> {count}"
 HEADER_OVERDUE = "⚠️ <b>Просрочено</b>"
 SEARCH_TRUNCATED = "Показаны первые {limit} — уточните запрос."
@@ -246,6 +249,42 @@ REVIEW_BAD_DATE = (
 )
 # Кнопки живут в чате вечно, а запись за это время могли закрыть или перенести
 REVIEW_STALE = "Этой записи в разборе больше нет."
+
+
+# --- Карточка сохранённой записи (этап 7) ------------------------------------
+
+ENTRY_HINT = "<i>Что с ней сделать?</i>"
+ENTRY_ASK_TEXT = "Ответьте на это сообщение новым текстом записи."
+ENTRY_ASK_DATE = (
+    "Ответьте на это сообщение днём — «в пятницу», «через неделю», "
+    "«3 сентября». Время у записи останется прежним, а у записи без срока "
+    "получится «весь день». Чтобы убрать срок, ответьте «без даты»."
+)
+ENTRY_BAD_TEXT = "Пустой текст записи не годится."
+ENTRY_BAD_DATE = (
+    "Не понял день. Напишите словами: «завтра», «в пятницу», «через неделю»."
+)
+ENTRY_ASK_DELETE = "Удалить «{title}»? Вернуть можно будет сразу, но не потом."
+ENTRY_DELETED = "Удалил: {title}"
+ENTRY_RESTORED = "Вернул: {title}"
+ENTRY_DATE_SAVED = "Срок теперь {when}."
+ENTRY_DATE_CLEARED = "Убрал срок."
+# Своё «устарело»: `DONE_ALREADY` говорит «уже закрыта» и про удалённую врёт,
+# а `REVIEW_STALE` поминает разбор, которого здесь нет
+ENTRY_GONE = "Этой записи больше нет."
+ENTRY_EDIT_FAILED = "Не смог обновить карточку — попробуйте ещё раз."
+
+
+def entry_ask_delete(title: str) -> str:
+    return ENTRY_ASK_DELETE.format(title=_escape(title[:60]))
+
+
+def entry_deleted(title: str) -> str:
+    return ENTRY_DELETED.format(title=title[:60])
+
+
+def entry_restored(title: str) -> str:
+    return ENTRY_RESTORED.format(title=title[:60])
 
 
 def review_tail(count: int) -> str:

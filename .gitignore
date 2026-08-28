@@ -5,7 +5,6 @@ data/
 *.db-shm
 parse.log
 run-*.log
-token.json
 __pycache__/
 *.py[cod]
 .venv/

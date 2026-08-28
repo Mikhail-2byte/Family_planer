@@ -16,6 +16,12 @@ from bot.services.timeutil import now_utc
 # в одну сводку.
 DUE_LIMIT = 200
 
+# Удалённая запись (этап 7). Мягкое удаление, а не `DELETE`: промах пальцем не
+# должен стоить данных, а выгрузка обязана помнить всё, что когда-либо было.
+# Значение было заложено в схему `PLAN.md` с самого начала, поэтому колонка
+# `entries.status` его принимает без миграции.
+ARCHIVED = "archived"
+
 log = logging.getLogger(__name__)
 
 
@@ -169,7 +175,13 @@ async def entries_by_kind(
     offset: int = 0,
 ) -> tuple[list[Entry], int]:
     """Страница записей одного типа + общее число. Сначала со сроком, затем без."""
-    where = [Entry.family_id == family_id, Entry.kind == kind]
+    # Удалённое отсеивается всегда, а не только когда спросили конкретный статус:
+    # ветка `status=None` означает «все живые», а не «вообще все»
+    where = [
+        Entry.family_id == family_id,
+        Entry.kind == kind,
+        Entry.status != ARCHIVED,
+    ]
     if status:
         where.append(Entry.status == status)
 
@@ -190,6 +202,11 @@ async def all_entries(session: AsyncSession, family_id: int) -> list[Entry]:
     Потолка нет намеренно, в отличие от всех остальных выборок: выгрузка едет
     файлом, а не сообщением, и обрезанный экспорт хуже большого — по нему уже
     ничего не восстановишь.
+
+    По той же причине здесь нет и фильтра на `ARCHIVED`, хотя он есть во всех
+    соседних выборках: выгрузка — **единственное место, где удалённое вообще
+    видно**, и молча терять его в единственной копии данных нельзя. Отличить
+    удалённое от живого обязан `services/export.py`.
     """
     result = await session.scalars(
         select(Entry)
@@ -214,12 +231,17 @@ def _like_pattern(query: str) -> str:
 async def search_entries(
     session: AsyncSession, family_id: int, query: str, limit: int = SEARCH_LIMIT
 ) -> list[Entry]:
-    """Поиск по заголовку и телу, без учёта регистра."""
+    """Поиск по заголовку и телу, без учёта регистра.
+
+    Статус не фильтруется — закрытые записи находиться должны, — но удалённые
+    нет: `/find` не должен воскрешать то, что человек выбросил.
+    """
     pattern = _like_pattern(query)
     result = await session.scalars(
         select(Entry)
         .where(
             Entry.family_id == family_id,
+            Entry.status != ARCHIVED,
             func.lower_unicode(Entry.title).like(pattern, escape="\\")
             | func.lower_unicode(func.coalesce(Entry.body, "")).like(
                 pattern, escape="\\"
@@ -247,7 +269,12 @@ async def complete_entry(
 
 
 async def reschedule_entry(
-    session: AsyncSession, entry_id: int, family_id: int, due_at: datetime
+    session: AsyncSession,
+    entry_id: int,
+    family_id: int,
+    due_at: datetime | None,
+    *,
+    all_day: bool | None = None,
 ) -> Entry | None:
     """Перенести запись на другой срок. Контракт — как у `complete_entry`.
 
@@ -257,11 +284,82 @@ async def reschedule_entry(
     намеренно: звонящему во всех трёх случаях говорить одно и то же.
 
     Единственное место в проекте, меняющее `due_at` уже сохранённой записи.
+    Оба расширения этапа 7 сделаны так, чтобы вторым такому месту не появиться:
+    `due_at=None` снимает срок совсем, а `all_day=None` означает «не трогать» —
+    поэтому разбор незакрытого (5п) зовёт функцию ровно как раньше.
     """
     entry = await session.get(Entry, entry_id)
     if entry is None or entry.family_id != family_id or entry.status != "open":
         return None
     entry.due_at = due_at
+    if all_day is not None:
+        entry.all_day = all_day
+    await session.commit()
+    await session.refresh(entry)
+    return entry
+
+
+async def edit_entry_title(
+    session: AsyncSession, entry_id: int, family_id: int, title: str
+) -> Entry | None:
+    """Переписать заголовок сохранённой записи (этап 7). Контракт — как у соседей.
+
+    Заодно правит текст **живых** напоминаний записи, и это не любезность:
+    `create_reminder` везде получает `text=entry.title` снимком, поэтому без
+    этого переименованная «позвонить маме» в 19:00 всё равно скажет про маму.
+    Отработавшие и выключенные не трогаем — их текст уже история.
+
+    Обрезка до длины колонки остаётся на вызывающем: он же чистит пробелы.
+    """
+    entry = await session.get(Entry, entry_id)
+    if entry is None or entry.family_id != family_id or entry.status != "open":
+        return None
+    entry.title = title
+    for reminder in await entry_reminders(session, entry_id):
+        reminder.text = title
+    await session.commit()
+    await session.refresh(entry)
+    return entry
+
+
+async def archive_entry(
+    session: AsyncSession, entry_id: int, family_id: int
+) -> Entry | None:
+    """Удалить запись мягко: она исчезает со всех экранов, но остаётся в базе.
+
+    Физического `DELETE` в проекте нет ни для чего, кроме пустышки-семьи при
+    переезде в супергруппу, и заводить его здесь не надо: отката у удаления
+    почти нет, а выгрузка обязана помнить всё.
+
+    Принимает только открытую запись. Закрытую удалять нечем и незачем: в
+    `/tasks`, `/notes` и `/events` её уже не видно, а пункт списка покупок в
+    карточку не попадает вовсе — у панели списка своя клавиатура.
+
+    Напоминания гасить не нужно: `due_reminders` требует `status == 'open'`,
+    и удалённая запись замолкает тем же механизмом, что и закрытая.
+    """
+    entry = await session.get(Entry, entry_id)
+    if entry is None or entry.family_id != family_id or entry.status != "open":
+        return None
+    entry.status = ARCHIVED
+    await session.commit()
+    await session.refresh(entry)
+    return entry
+
+
+async def unarchive_entry(
+    session: AsyncSession, entry_id: int, family_id: int
+) -> Entry | None:
+    """Вернуть удалённую запись. Тот же довод, что у `reopen_list`.
+
+    Подтверждение спасает от промаха пальцем, но не от «удалил не ту из восьми»,
+    а после удаления записи не видно нигде, кроме файла выгрузки. Без обратного
+    хода ошибка была бы неисправима изнутри бота.
+    """
+    entry = await session.get(Entry, entry_id)
+    if entry is None or entry.family_id != family_id or entry.status != ARCHIVED:
+        return None
+    entry.status = "open"
     await session.commit()
     await session.refresh(entry)
     return entry
@@ -282,6 +380,12 @@ async def entry_reminders(session: AsyncSession, entry_id: int) -> list[Reminder
 async def entry_counts_by_author(
     session: AsyncSession, family_id: int
 ) -> dict[int, int]:
+    """Кто сколько записал — для `/family`.
+
+    Удалённое считается наравне с живым, и это решение, а не забытый фильтр:
+    здесь меряется вклад человека, а не остаток дел. Соседние выборки отсеивают
+    `ARCHIVED`, так что несогласованность бросается в глаза — она намеренная.
+    """
     rows = await session.execute(
         select(Entry.author_id, func.count())
         .where(Entry.family_id == family_id)
@@ -552,10 +656,14 @@ async def list_items(session: AsyncSession, list_id: int) -> list[Entry]:
     и при гонке двух добавлений два пункта могут получить одинаковый номер.
     Без второго ключа их порядок между перерисовками плавал бы, а вместе с ним
     поехала бы и нумерация кнопок.
+
+    Удалённые пункты не отдаём. Фильтр стоит здесь, а не у вызывающих: их пять —
+    четыре в панели списка (отрисовка, потолок `MAX_LIST_ITEMS`, закрытие и
+    возврат в работу) и счётчик покупок в сводке дня.
     """
     result = await session.scalars(
         select(Entry)
-        .where(Entry.list_id == list_id)
+        .where(Entry.list_id == list_id, Entry.status != ARCHIVED)
         .order_by(Entry.position, Entry.id)
     )
     return list(result)
@@ -608,9 +716,20 @@ async def toggle_bought(
 
     Снятие обнуляет `done_at` и `done_by`: иначе «купила Аня» осталось бы
     висеть на пункте, который никто не покупал.
+
+    Удалённый пункт отвергается, и это не формальность: ветка «снять галку»
+    ловит **любой** статус кроме `open`, а панелей списка в чате лежит стопка —
+    старые перевыпускаются, но не умирают. Без этой проверки тап по кнопке в
+    любой из них воскресил бы удалённый пункт, да ещё и оживил бы весь список
+    через `reopen_list`.
     """
     entry = await session.get(Entry, entry_id)
-    if entry is None or entry.family_id != family_id or entry.list_id is None:
+    if (
+        entry is None
+        or entry.family_id != family_id
+        or entry.list_id is None
+        or entry.status == ARCHIVED
+    ):
         return None
     if entry.status == "open":
         entry.status = "done"
@@ -636,11 +755,21 @@ async def sync_list_archived(session: AsyncSession, lst: ListModel) -> bool:
 
     Пустой список закрытым не считается — иначе только что созданный сразу
     уезжал бы в архив.
+
+    Удалённые пункты не считаются **обоими** счётчиками. Без вычета из `total`
+    список, из которого выбросили все пункты, уезжал бы в «🧹 Список закрыт»:
+    открытых не осталось, а всего больше нуля. С вычетом он становится пустым,
+    а пустой закрытым не считается — ровно как только что созданный.
+
+    А вот список, где удалили последний **недокупленный** пункт, закрывается, и
+    так и надо: покупать в нём больше нечего.
     """
     if lst.archived:
         return True
     total = await session.scalar(
-        select(func.count()).select_from(Entry).where(Entry.list_id == lst.id)
+        select(func.count())
+        .select_from(Entry)
+        .where(Entry.list_id == lst.id, Entry.status != ARCHIVED)
     )
     open_left = await session.scalar(
         select(func.count())

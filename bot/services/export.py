@@ -29,7 +29,13 @@ KIND_TITLES = {
 
 KIND_ORDER = ("task", "event", "note", "shopping")
 
-STATUS_TITLES = {"open": "открыта", "done": "закрыта"}
+# Удалённая запись (этап 7) из базы не пропадает и обязана попасть в выгрузку:
+# это единственное место, где её вообще видно. Но выглядеть как живая она не
+# должна — иначе выгрузка врёт ровно про то, ради чего мягкое удаление затеяно
+STATUS_TITLES = {"open": "открыта", "done": "закрыта", "archived": "удалена"}
+
+# Чекбоксы Markdown: удалённой нужен свой, иначе она неотличима от открытой
+STATUS_BOXES = {"done": "[x]", "archived": "[—]"}
 
 COLUMNS = (
     "id",
@@ -122,7 +128,7 @@ def to_markdown(entries: list[Entry], tz: str, title: str, today: date) -> bytes
 
 
 def _md_line(entry: Entry, tz: str) -> str:
-    box = "[x]" if entry.status == "done" else "[ ]"
+    box = STATUS_BOXES.get(entry.status, "[ ]")
     parts = [f"- {box}"]
     when = _moment(entry.due_at, tz, all_day=entry.all_day)
     if when:

@@ -14,7 +14,7 @@ from bot import texts
 from bot.db import repo
 from bot.db.models import Reminder
 from bot.handlers import review as handler
-from bot.services import digest, review, sending
+from bot.services import digest, entries, review, sending
 from bot.services import timeutil as tu
 from sqlalchemy import select
 
@@ -272,7 +272,7 @@ async def test_move_survives_the_dst_switch(session, family, anya):
     )
     before = entry.due_at
 
-    moved = await handler._move(session, entry, family, date(2026, 10, 25))  # уже CET
+    moved = await entries.move(session, entry, family, date(2026, 10, 25))  # уже CET
 
     assert tu.to_local(moved.due_at, berlin).time() == time(19, 0)
     # Наивный сдвиг на сутки дал бы ровно это — и уехал бы на час

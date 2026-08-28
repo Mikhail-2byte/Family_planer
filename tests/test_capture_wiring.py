@@ -15,14 +15,15 @@ import pytest
 import pytest_asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import EditMessageText, SendMessage
-from aiogram.types import Chat, Message, Update, User, Voice
+from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
+from aiogram.types import CallbackQuery, Chat, Message, Update, User, Voice
 
 from bot import keyboards as kb
 from bot import middlewares as mw
 from bot import texts
 from bot.db import repo
 from bot.handlers import capture, routers
+from bot.handlers import entry as entry_handler
 from bot.handlers import review as review_handler
 from bot.handlers import settings as settings_handler
 from bot.handlers import voice as voice_handler
@@ -41,6 +42,7 @@ class OfflineSession(BaseSession):
         super().__init__()
         self.sent: list[str] = []
         self.edited: list[str] = []
+        self.answered: list[str] = []
         self._next_id = 900
 
     async def make_request(self, bot, method, timeout=None):
@@ -56,6 +58,9 @@ class OfflineSession(BaseSession):
                 chat=CHAT,
                 text=method.text,
             )
+        if isinstance(method, AnswerCallbackQuery):
+            self.answered.append(method.text or "")
+            return True
         raise AssertionError(f"неожиданный вызов Telegram: {type(method).__name__}")
 
     async def stream_content(self, *args, **kwargs):  # pragma: no cover
@@ -413,3 +418,89 @@ async def test_review_reply_never_reaches_the_model(wired, asked, monkeypatch):
     async with mw.Session() as s:
         moved = await repo.get_entry(s, entry.id)
         assert moved.due_at > datetime(2026, 8, 20, 16, 0)
+
+
+@pytest.mark.asyncio
+async def test_entry_card_reply_never_reaches_the_model(wired, asked):
+    """Новый текст записи ответом на карточку — не фраза для модели.
+
+    Та же грабля, что у разбора и у карточки подтверждения: реплай на сообщение
+    бота есть обращение по всем признакам `IsTrigger`. Роутер `entry` стоит
+    раньше `capture`, и текст обязан уйти в правку, а не в LLM.
+    """
+    dp, bot, telegram = wired
+    calls = asked({"intent": "create", "items": [{"title": "перехвачено"}]})
+
+    async with mw.Session() as s:
+        family = await repo.get_family(s, CHAT.id)
+        member = await repo.get_or_create_member(s, family.id, ANYA.id, ANYA.first_name)
+        entry = await repo.create_entry(
+            s,
+            family_id=family.id,
+            author_id=member.id,
+            kind="task",
+            title="Позвонить маме",
+        )
+
+    card_id = 4444
+    entry_handler._pending[(CHAT.id, card_id)] = (entry.id, "text", "tasks", 0)
+    try:
+        card = Message(
+            message_id=card_id,
+            date=datetime(2026, 8, 27, 12, 0),
+            chat=CHAT,
+            from_user=User(id=BOT_ID, is_bot=True, first_name="Планировщик"),
+            text="Что с ней сделать?",
+        )
+        await dp.feed_update(
+            bot, _update("Позвонить бабушке", message_id=9, reply_to=card)
+        )
+
+        assert calls == []  # правка перехватила раньше, модель не звали
+    finally:
+        entry_handler._pending.clear()
+
+    async with mw.Session() as s:
+        edited = await repo.get_entry(s, entry.id)
+        assert edited.title == "Позвонить бабушке"
+
+
+@pytest.mark.asyncio
+async def test_entry_card_tap_resolves_its_arguments(wired):
+    """Тап по «✏️» доходит до хендлера и получает сессию, семью и бота.
+
+    Колбэки в остальных тестах зовутся напрямую и промаха в именах аргументов
+    не видят, а такой промах роняет бота **в рантайме** — при первом же тапе.
+    """
+    dp, bot, telegram = wired
+
+    async with mw.Session() as s:
+        family = await repo.get_family(s, CHAT.id)
+        member = await repo.get_or_create_member(s, family.id, ANYA.id, ANYA.first_name)
+        entry = await repo.create_entry(
+            s,
+            family_id=family.id,
+            author_id=member.id,
+            kind="task",
+            title="Позвонить маме",
+        )
+
+    page = Message(
+        message_id=7777,
+        date=datetime(2026, 8, 27, 12, 0),
+        chat=CHAT,
+        from_user=User(id=BOT_ID, is_bot=True, first_name="Планировщик"),
+        text="✅ Задачи",
+    )
+    tap = CallbackQuery(
+        id="1",
+        from_user=ANYA,
+        chat_instance="ci",
+        message=page,
+        data=kb.EntryCB(
+            action="open", entry_id=entry.id, view="tasks", offset=0
+        ).pack(),
+    )
+    await dp.feed_update(bot, Update(update_id=77, callback_query=tap))
+
+    assert telegram.edited and "Позвонить маме" in telegram.edited[-1]

@@ -262,8 +262,11 @@ async def test_render_page_numbers_entries_and_builds_nav(session, family, anya)
     assert "1. " in text and "8. " in text and "9. " not in text
     assert "1–8" in text and "10" in text
 
-    done_row, nav_row = markup.inline_keyboard
-    assert [b.text for b in done_row] == [f"✅ {i}" for i in range(1, 9)]
+    # Ряд на запись: закрыть и открыть карточку. Последний ряд — навигация
+    *entry_rows, nav_row = markup.inline_keyboard
+    assert [[b.text for b in row] for row in entry_rows] == [
+        [f"✅ {i}", f"✏️ {i}"] for i in range(1, 9)
+    ]
     assert [b.text for b in nav_row] == ["→"]  # назад некуда
 
     _, markup2 = await _render_page(session, family, "tasks", 8)
@@ -416,7 +419,7 @@ async def test_notes_page_offers_a_close_button(session, family, anya):
     )
 
     _, markup = await _render_page(session, family, "notes", 0)
-    assert [b.text for b in markup.inline_keyboard[0]] == ["✅ 1"]
+    assert [b.text for b in markup.inline_keyboard[0]] == ["✅ 1", "✏️ 1"]
 
 
 @pytest.mark.asyncio

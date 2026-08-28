@@ -33,13 +33,43 @@ BTN_CANCEL = "❌ Отмена"
 
 
 class PageCB(CallbackData, prefix="page"):
-    view: str  # 'tasks' | 'notes'
+    # 'tasks' | 'notes' | 'events'. Новое значение, а не новое поле: старые
+    # кнопки в чате распаковываются как раньше
+    view: str
     offset: int
 
 
 class DoneCB(CallbackData, prefix="done"):
     entry_id: int
     offset: int
+
+
+class EntryCB(CallbackData, prefix="ent"):
+    """Карточка сохранённой записи: правка, дата, удаление (этап 7).
+
+    Отдельный класс, а не поле в `DoneCB`, по той же причине, что и `ReviewCB`:
+    у кнопок, уже висящих в чате, `callback_data` вида `done:42:0`, и лишнее
+    поле сделало бы их неразбираемыми — тап по старому списку молча перестал бы
+    работать.
+
+    Состояния карточка почти не держит: и запись, и страница, куда возвращаться,
+    едут прямо здесь. В памяти живёт только ожидание ответа реплаем.
+    """
+
+    # 'open' | 'text' | 'date' | 'day' | 'other' | 'nodate' | 'del' | 'yes'
+    # | 'undo' | 'back'
+    action: str
+    entry_id: int
+    # Страница, с которой пришли: вид и смещение. Класс новый, поля можно
+    # заводить свободно — в отличие от `DoneCB`, где вид приходится добывать из
+    # `entry.kind`. Вид нужен и на случай, когда записи уже нет: вернуть
+    # человека на ту же страницу, а не молча подсунуть чужую
+    view: str = "tasks"
+    offset: int = 0
+    # Только у 'day': сдвиг в днях от сегодня. Отдельным полем, а не поверх
+    # `offset` — иначе после переноса страница возврата теряется и «← Назад»
+    # уводит на первую
+    value: int = 0
 
 
 BTN_SAVE_ANYWAY = "✅ Всё равно сохранить"
@@ -148,22 +178,37 @@ def capture_kind_keyboard() -> InlineKeyboardMarkup:
 def entry_list_keyboard(
     entries, view: str, offset: int, total: int, page_size: int
 ) -> InlineKeyboardMarkup | None:
-    """Ряд кнопок «закрыть N-ю запись» + навигация. None, если нечего показывать."""
+    """По ряду на запись — закрыть и открыть карточку — плюс навигация.
+
+    До этапа 7 все «✅ N» лежали одним рядом. Ряд на запись — раскладка
+    `review_keyboard`, и она же единственная, куда помещается вторая кнопка.
+
+    Заметки закрываются той же кнопкой, что и задачи. Без неё они копились бы
+    вечно: закрыть запись умеет только этот колбэк, а заметка с прошедшим сроком
+    вдобавок навсегда оседала в блоке «Просрочено».
+
+    Кнопок ровно столько же, сколько пронумерованных строк в тексте: рассинхрон
+    номеров молча уводит «Готово» не на ту запись.
+
+    `DoneCB` тут прежний, до последнего поля. Кнопки, уже висящие в чате, обязаны
+    продолжать работать — они просто никогда не получат «✏️», пока их сообщение
+    не перерисуют.
+    """
     rows: list[list[InlineKeyboardButton]] = []
 
-    if entries:
-        # Заметки закрываются той же кнопкой, что и задачи. Без неё они копились
-        # бы вечно: закрыть запись умеет только этот колбэк, а заметка с
-        # прошедшим сроком вдобавок навсегда оседала в блоке «Просрочено».
-        # Кнопок ровно столько же, сколько пронумерованных строк в тексте:
-        # рассинхрон номеров молча уводит «Готово» не на ту запись
+    for i, e in enumerate(entries[:page_size], start=1):
         rows.append(
             [
                 InlineKeyboardButton(
                     text=f"✅ {i}",
                     callback_data=DoneCB(entry_id=e.id, offset=offset).pack(),
-                )
-                for i, e in enumerate(entries[:page_size], start=1)
+                ),
+                InlineKeyboardButton(
+                    text=f"✏️ {i}",
+                    callback_data=EntryCB(
+                        action="open", entry_id=e.id, view=view, offset=offset
+                    ).pack(),
+                ),
             ]
         )
 
@@ -299,3 +344,185 @@ def review_remind_keyboard(entry_id: int, *, all_day: bool) -> InlineKeyboardMar
             ],
         ]
     )
+
+
+# --- Карточка сохранённой записи (этап 7) ------------------------------------
+
+BTN_ENTRY_TEXT = "✏️ Текст"
+BTN_ENTRY_DATE = "📅 Дата"
+BTN_ENTRY_DELETE = "🗑 Удалить"
+BTN_ENTRY_DELETE_YES = "🗑 Да, удалить"
+BTN_ENTRY_NO_DATE = "🚫 Убрать дату"
+BTN_ENTRY_UNDO = "↩️ Вернуть"
+BTN_ENTRY_BACK = "← Назад"
+
+
+def entry_card_keyboard(entry_id: int, view: str, offset: int) -> InlineKeyboardMarkup:
+    """Что можно сделать с сохранённой записью.
+
+    Типа тут нет намеренно, в отличие от карточки разбора: сменить тип уже
+    сохранённой записи значит выдать или отобрать слот в списке покупок, а это
+    отдельная работа. До сохранения тип меняет `capture`.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=BTN_ENTRY_TEXT,
+                    callback_data=EntryCB(
+                        action="text",
+                        entry_id=entry_id,
+                        view=view,
+                        offset=offset,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text=BTN_ENTRY_DATE,
+                    callback_data=EntryCB(
+                        action="date",
+                        entry_id=entry_id,
+                        view=view,
+                        offset=offset,
+                    ).pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=BTN_ENTRY_DELETE,
+                    callback_data=EntryCB(
+                        action="del",
+                        entry_id=entry_id,
+                        view=view,
+                        offset=offset,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=BTN_ENTRY_BACK,
+                    callback_data=EntryCB(
+                        action="back",
+                        entry_id=entry_id,
+                        view=view,
+                        offset=offset,
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+
+
+def entry_date_keyboard(
+    entry_id: int, view: str, offset: int, *, has_date: bool
+) -> InlineKeyboardMarkup:
+    """Куда передвинуть срок. Дни те же, что в разборе незакрытого.
+
+    «Убрать дату» показывается только тем, у кого дата есть: кнопка, которая
+    заведомо ничего не изменит, обещает действие впустую.
+    """
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=title,
+                callback_data=EntryCB(
+                    action="day",
+                    entry_id=entry_id,
+                    view=view,
+                    offset=offset,
+                    value=days,
+                ).pack(),
+            )
+            for title, days in REVIEW_DAYS
+        ],
+        [
+            InlineKeyboardButton(
+                text=BTN_REVIEW_OTHER_DAY,
+                callback_data=EntryCB(
+                    action="other",
+                    entry_id=entry_id,
+                    view=view,
+                    offset=offset,
+                ).pack(),
+            )
+        ],
+    ]
+    if has_date:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=BTN_ENTRY_NO_DATE,
+                    callback_data=EntryCB(
+                        action="nodate",
+                        entry_id=entry_id,
+                        view=view,
+                        offset=offset,
+                    ).pack(),
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=BTN_ENTRY_BACK,
+                callback_data=EntryCB(
+                    action="open",
+                    entry_id=entry_id,
+                    view=view,
+                    offset=offset,
+                ).pack(),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def entry_delete_keyboard(
+    entry_id: int, view: str, offset: int
+) -> InlineKeyboardMarkup:
+    """Подтверждение удаления. Отката в интерфейсе почти нет — спрашиваем."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=BTN_ENTRY_DELETE_YES,
+                    callback_data=EntryCB(
+                        action="yes",
+                        entry_id=entry_id,
+                        view=view,
+                        offset=offset,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text=BTN_ENTRY_BACK,
+                    callback_data=EntryCB(
+                        action="open",
+                        entry_id=entry_id,
+                        view=view,
+                        offset=offset,
+                    ).pack(),
+                ),
+            ]
+        ]
+    )
+
+
+def entry_undo_row(
+    entry_id: int, view: str, offset: int
+) -> list[InlineKeyboardButton]:
+    """Ряд «↩️ Вернуть», который дописывается к перерисованной странице.
+
+    Живёт ровно до следующей перерисовки списка, и этого достаточно: откат
+    нужен сразу после промаха, а не через неделю. Тот же довод, по которому у
+    закрытого списка покупок есть «Вернуть в работу».
+    """
+    return [
+        InlineKeyboardButton(
+            text=BTN_ENTRY_UNDO,
+            callback_data=EntryCB(
+                action="undo",
+                entry_id=entry_id,
+                view=view,
+                offset=offset,
+            ).pack(),
+        )
+    ]

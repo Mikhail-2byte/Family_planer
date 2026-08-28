@@ -1,6 +1,7 @@
 from bot.handlers import (
     admin,
     capture,
+    entry,
     lists,
     new_entry,
     remind,
@@ -24,6 +25,7 @@ routers = [
     remind.router,
     settings.router,
     review.router,
+    entry.router,
     new_entry.router,
     capture.router,
 ]
@@ -38,5 +40,6 @@ for _router in (
     remind.router,
     settings.router,
     review.router,
+    entry.router,
 ):
     _router.message.middleware(drop_wizard_state)
