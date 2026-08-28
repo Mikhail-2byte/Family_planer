@@ -24,7 +24,7 @@ log = logging.getLogger("bot")
 
 def make_bot() -> Bot:
     # Пустой TELEGRAM_PROXY = ходим напрямую. Прокси нужен из-за нестабильной
-    # доступности api.telegram.org из России (PLAN.md, «Сеть и деплой»)
+    # доступности api.telegram.org из России
     session = AiohttpSession(proxy=settings.telegram_proxy) if settings.telegram_proxy else None
     return Bot(
         token=settings.bot_token,

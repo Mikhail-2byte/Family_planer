@@ -79,7 +79,7 @@ class ListModel(Base):
 
 
 class Entry(Base):
-    """Одна таблица на task/note/event/shopping — см. PLAN.md, «Модель данных»."""
+    """Одна таблица на task/note/event/shopping — тип записи в поле `kind`."""
 
     __tablename__ = "entries"
 

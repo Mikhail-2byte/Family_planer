@@ -49,7 +49,7 @@ async def cmd_remind(
     fire_at = tu.to_utc(parsed.when, family.tz)
     if fire_at <= now:
         # Иначе тикер честно отработает догонкой и выстрелит немедленно —
-        # сюрприз на пустом месте (PLAN.md, «Проверка на дату в прошлом»)
+        # сюрприз на пустом месте
         await message.answer(texts.remind_in_past(fire_at, family.tz, now))
         return
 

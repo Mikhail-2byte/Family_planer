@@ -140,7 +140,7 @@ def _draft(card):
 
 @pytest.mark.asyncio
 async def test_fallback_shows_a_card_when_the_model_is_down(run, no_model):
-    """Проверка 11 из PLAN.md: без OpenRouter бот жив и что-то всё же понимает."""
+    """Без OpenRouter бот жив и что-то всё же понимает."""
     message, card = await run("забрать посылку завтра в 19:00")
 
     assert card is not None
@@ -210,7 +210,7 @@ def _past(hours: float = 3) -> str:
 
 @pytest.mark.asyncio
 async def test_past_date_is_flagged_and_the_button_renamed(run, model):
-    """Проверка 9 из PLAN.md: «напомни вчера в 19» — предупреждение, а не выстрел."""
+    """«напомни вчера в 19» — предупреждение, а не выстрел."""
     model(
         {
             "intent": "create",

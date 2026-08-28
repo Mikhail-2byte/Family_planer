@@ -286,7 +286,7 @@ async def test_without_key_the_button_says_so(family, monkeypatch):
 async def test_recognised_text_is_shown_before_parsing(
     session, family, anya, bot, heard, monkeypatch
 ):
-    """Проверка 10 из PLAN.md: сначала видно, что услышал бот, потом разбор.
+    """Сначала видно, что услышал бот, потом разбор.
 
     Порядок проверяется изнутри разбора, а не сравнением двух списков после:
     два независимых списка остались бы такими же, поменяй местами `reply` и

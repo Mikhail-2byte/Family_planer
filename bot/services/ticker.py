@@ -1,6 +1,6 @@
 """Фоновый цикл: напоминания, догонка пропущенного, утренний дайджест.
 
-Почему свой цикл, а не APScheduler — в `PLAN.md`, «Почему не APScheduler».
+Почему свой цикл, а не APScheduler — в `CLAUDE.md`, «Почему так».
 Коротко: всё состояние лежит обычными строками в `reminders`, рестарт
 переживается бесплатно, а догонка после выключенного ПК получается сама собой.
 
@@ -36,7 +36,7 @@ SUMMARY = "summary"  # ПК был выключен надолго — свор�
 def classify_lateness(
     fire_at: datetime, now: datetime, *, silent_min: int, summary_hours: int
 ) -> str:
-    """Насколько сильно опоздало напоминание (`PLAN.md`, «Логика догонки»)."""
+    """Насколько сильно опоздало напоминание: молча, с пометкой или сводкой."""
     delay = now - fire_at
     if delay < timedelta(minutes=silent_min):
         return SILENT

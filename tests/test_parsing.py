@@ -50,7 +50,7 @@ def test_prompt_carries_schema():
 
 
 def test_prompt_does_not_ask_for_dead_fields():
-    """`list` и `assignee` из схемы PLAN.md выброшены до этапов 4 и «исполнитель».
+    """`list` и `assignee` из ранней схемы выброшены до этапов 4 и «исполнитель».
 
     Спрашивать поле, которое `normalize` всё равно не читает, — платить
     токенами за приглашение галлюцинировать.

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     digest_time: str = "08:00"
     tick_seconds: int = 60
 
-    # Пороги догонки пропущенного (см. PLAN.md — «Логика догонки»)
+    # Пороги догонки пропущенного — три ступени в `ticker.lateness`
     late_silent_min: int = 10
     late_summary_hours: int = 12
 

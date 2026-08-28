@@ -1,0 +1,9 @@
+# Конфиг pytest. Отдельного `pytest.ini` нет: настройки инструментов держим
+# в одном каноническом файле. Метаданных пакета здесь нет намеренно —
+# проект не устанавливается, а запускается из корня (`python -m bot`), и
+# зависимости живут в `requirements.txt`, который Dockerfile ставит
+# отдельным слоем ради кеша.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
