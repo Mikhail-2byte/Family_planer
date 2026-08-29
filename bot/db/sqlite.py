@@ -9,6 +9,7 @@
 """
 
 import logging
+from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
@@ -25,7 +26,7 @@ def _lower(value: str | None) -> str | None:
 
 
 @event.listens_for(Engine, "connect")
-def _setup_connection(dbapi_connection, _record) -> None:
+def _setup_connection(dbapi_connection: Any, _record: Any) -> None:
     dbapi_connection.create_function("lower_unicode", 1, _lower, deterministic=True)
 
     cursor = dbapi_connection.cursor()
@@ -35,6 +36,12 @@ def _setup_connection(dbapi_connection, _record) -> None:
         # На базе в памяти (тесты) SQLite молча остаётся в режиме `memory`.
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        # SQLite по умолчанию внешние ключи **не проверяет**, и без этой строки
+        # все `ForeignKey` в `models.py` — декларация, а не защита. Симптом уже
+        # виден в тикере: «осиротевшие напоминания — данные из прошлой жизни».
+        # Включаем на соединение, потому что PRAGMA не глобальная, а
+        # per-connection: пул откроет новое — и оно снова будет без проверки
+        cursor.execute("PRAGMA foreign_keys=ON")
     except Exception:  # pragma: no cover — не должно мешать боту стартовать
         log.warning("Не удалось выставить PRAGMA для SQLite", exc_info=True)
     finally:

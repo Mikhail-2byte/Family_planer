@@ -38,6 +38,17 @@ async def bot_added(event: ChatMemberUpdated, bot: Bot, family: Family) -> None:
     log.info("Добавлен в чат %s (семья #%s)", family.chat_id, family.id)
 
 
+@router.message(Command("help"), IN_GROUP)
+async def cmd_help(message: Message) -> None:
+    """Что бот умеет и когда слушает.
+
+    Выше ловушки `private_chat` — как и все хендлеры этого модуля. Команды в
+    личке всё равно не работают: `IN_GROUP` уводит их в ловушку, а она отвечает
+    «работаю только в группе», что и есть правильный ответ.
+    """
+    await message.answer(texts.HELP, reply_markup=kb.main_keyboard())
+
+
 @router.message(Command("ping"), IN_GROUP)
 async def cmd_ping(message: Message, session: AsyncSession, family: Family) -> None:
     members = await repo.members_of(session, family.id)
@@ -85,11 +96,16 @@ async def cmd_backup(message: Message, family: Family) -> None:
 async def cmd_export(
     message: Message, session: AsyncSession, family: Family
 ) -> None:
-    """Все записи семьи двумя файлами: Markdown и CSV (шаг 6.3).
+    """Все записи семьи тремя файлами: Markdown, CSV и календарь.
 
     Файлы собираются в памяти — временных файлов и уборки за ними не нужно
     вовсе. Обрезки нет: выгрузка едет файлом, а не сообщением, и урезанный
     экспорт хуже большого.
+
+    `.ics` — то, что осталось от отменённой интеграции с Google Календарём:
+    события видны в любом календаре, а OAuth и хранения токенов не нужно.
+    В нём только записи со сроком, поэтому он бывает пустым при непустых
+    остальных двух — тогда его просто не отправляем.
     """
     entries = await repo.all_entries(session, family.id)
     if not entries:
@@ -102,11 +118,15 @@ async def cmd_export(
 
     markdown = export.to_markdown(entries, family.tz, title, today)
     table = export.to_csv(entries, family.tz)
+    calendar = export.to_ics(entries, family.tz, title, tu.now_utc())
+    dated = sum(
+        1 for e in entries if e.due_at is not None and e.status != "archived"
+    )
 
     # Обрезать выгрузку нельзя — по урезанной ничего не восстановишь, — но и
     # молча упереться в лимит Telegram она не должна: упавшая отправка съест
     # апдейт целиком, и человек не увидит вовсе ничего
-    biggest = max(len(markdown), len(table))
+    biggest = max(len(markdown), len(table), len(calendar))
     if biggest > MAX_UPLOAD_BYTES:
         await message.answer(texts.export_too_big(biggest))
         return
@@ -116,6 +136,13 @@ async def cmd_export(
         caption=texts.export_caption(today, len(entries)),
     )
     await message.answer_document(BufferedInputFile(table, f"{stem}.csv"))
+    if dated:
+        # Пустой календарь (ни одной записи со сроком) не шлём: файл валиден, но
+        # человеку он говорит только «что-то пошло не так»
+        await message.answer_document(
+            BufferedInputFile(calendar, f"{stem}.ics"),
+            caption=texts.export_ics_caption(dated),
+        )
 
 
 # Последним в модуле и без других фильтров: в личке бот отвечает одно и то же

@@ -16,7 +16,7 @@ from bot import keyboards as kb
 from bot import texts
 from bot.handlers import capture
 from bot.handlers import voice as handler
-from bot.services import parse_log
+from bot.services import http_retry, parse_log
 from bot.services import timeutil as tu
 from bot.services import voice as stt
 
@@ -28,10 +28,16 @@ STT_URL = "https://stt.test/v1/audio/transcriptions"
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
+    """Паузы между ретраями живут в `http_retry` — там их и гасим.
+
+    Раньше подменялся `asyncio.sleep` в самом модуле клиента; с выносом общей
+    политики повторов спать стало некому, и тест падал на отсутствии атрибута.
+    """
+
     async def instant(_seconds):
         return None
 
-    monkeypatch.setattr(stt.asyncio, "sleep", instant)
+    monkeypatch.setattr(http_retry.asyncio, "sleep", instant)
 
 
 @pytest.fixture(autouse=True)

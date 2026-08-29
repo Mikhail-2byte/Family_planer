@@ -41,27 +41,45 @@ async def build_day(
     # Оба списка обрезаны по MAX_DAY_ITEMS: просрочка копится годами, и без
     # потолка сводка однажды перерастает 4096 символов. Telegram отвечает
     # отказом, `sending.deliver` возвращает BROKEN, а `last_digest_on` всё равно
-    # проставляется — дайджест пропал бы молча и навсегда
+    # проставляется — дайджест пропал бы молча и навсегда.
+    #
+    # Счёта по записям для этого мало: длину заголовка задаёт человек, и
+    # пятнадцать записей по 500 символов дают 7500. Поэтому у `entry_lines` есть
+    # второй потолок, по символам, и бюджет тратится по ходу сборки —
+    # просрочка идёт первой и берёт своё, дню достаётся остаток
+    budget = texts.MESSAGE_LIMIT - texts.DAY_RESERVE
+
     blocks: list[str] = []
     if overdue:
-        blocks.append(
-            texts.HEADER_OVERDUE
+        head = texts.HEADER_OVERDUE
+        block = (
+            head
             + "\n"
             + "\n".join(
                 texts.entry_lines(
-                    overdue, family.tz, moment, limit=texts.MAX_DAY_ITEMS
+                    overdue,
+                    family.tz,
+                    moment,
+                    limit=texts.MAX_DAY_ITEMS,
+                    budget=budget - len(head) - 1,
                 )
             )
         )
+        blocks.append(block)
+        budget -= len(block) + 2  # блоки склеиваются через пустую строку
 
+    day_head = texts.day_header(today, family.tz, moment)
     body = "\n".join(
         texts.entry_lines(
-            entries, family.tz, moment, limit=texts.MAX_DAY_ITEMS, show_date=False
+            entries,
+            family.tz,
+            moment,
+            limit=texts.MAX_DAY_ITEMS,
+            show_date=False,
+            budget=budget - len(day_head) - 1,
         )
     )
-    blocks.append(
-        texts.day_header(today, family.tz, moment) + "\n" + (body or texts.EMPTY_TODAY)
-    )
+    blocks.append(day_head + "\n" + (body or texts.EMPTY_TODAY))
 
     # Короткая сводка по покупкам для утреннего дайджеста. Именно
     # счётчик, а не список: пункты покупок не привязаны ко дню, и вываливать

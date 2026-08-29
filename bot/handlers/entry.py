@@ -245,6 +245,46 @@ async def tap(
         await _show_card(call, session, updated, family, view, offset)
         return
 
+    if action == "who":
+        # Ожидание правки снимаем: экран сменился, и ответ реплаем после него
+        # правкой уже не считается — та же грабля, что у 'date' и 'del'
+        _pending.pop(key, None)
+        members = await repo.members_of(session, family.id)
+        card = await _card_text(session, entry, family)
+        await call.answer()
+        await edit_or_ignore(
+            call,
+            f"{card}\n\n{texts.entry_ask_who(entry.title)}",
+            kb.entry_assignee_keyboard(
+                entry.id,
+                view,
+                offset,
+                members,
+                assigned=entry.assignee_id is not None,
+            ),
+        )
+        return
+
+    if action == "setwho":
+        # 0 — «ничьё»: поле у `CallbackData` целочисленное, а участника с таким
+        # id не бывает. Семью участника проверяет сам `repo.set_assignee`
+        target_id = callback_data.value or None
+        updated = await repo.set_assignee(session, entry.id, family.id, target_id)
+        if updated is None:
+            await call.answer(texts.ENTRY_GONE, show_alert=True)
+            await _back_to_list(call, session, family, view, offset)
+            return
+        note = (
+            texts.entry_who_saved(updated.assignee.display_name)
+            if updated.assignee is not None
+            else texts.ENTRY_WHO_CLEARED
+        )
+        await call.answer(note)
+        # Панель дня показывает те же записи, а поручение видно в строке списка
+        panel.schedule(bot, family.id, call.message.message_id)
+        await _show_card(call, session, updated, family, view, offset)
+        return
+
     if action == "del":
         _pending.pop(key, None)
         await call.answer()

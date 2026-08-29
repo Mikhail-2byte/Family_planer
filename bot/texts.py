@@ -5,12 +5,36 @@
 угадывать род по имени значит регулярно ошибаться.
 """
 
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta
+from typing import Protocol
 
 from aiogram.utils.text_decorations import html_decoration as fmt
 
-from bot.db.models import Entry
+from bot.db.models import Entry, Reminder
 from bot.services import timeutil as tu
+
+
+class Parsed(Protocol):
+    """Разобранный элемент — то, что отдаёт `parsing.normalize`.
+
+    Структурный протокол, а не импорт `parsing.Item`: `parsing` — чистый модуль
+    и про `texts` не знает, а обратный импорт замкнул бы их в цикл при первом
+    же переносе константы. Здесь важно не имя класса, а набор полей.
+    """
+
+    kind: str
+    title: str
+    body: str | None
+    due_at: datetime | None
+    all_day: bool
+    reminders: tuple[datetime, ...]
+    rrule: str | None
+    confidence: float
+
+    @property
+    def uncertain(self) -> bool: ...
+
 
 GREETING = (
     "Привет! Я семейный планировщик.\n\n"
@@ -26,6 +50,7 @@ PONG = "Живой. Семья: {title}, участников: {members}."
 # без этого списка про `/week`, `/find`, `/family`, `/settings` и `/cancel`
 # узнать неоткуда
 COMMANDS = [
+    ("help", "Что я умею"),
     ("new", "Записать что-нибудь"),
     ("today", "План на сегодня"),
     ("week", "План на неделю"),
@@ -37,11 +62,42 @@ COMMANDS = [
     ("remind", "Напомнить: /remind завтра в 19:00 позвонить маме"),
     ("family", "Кто в семье и сколько записал"),
     ("settings", "Таймзона и время утренней сводки"),
-    ("export", "Выгрузить записи в Markdown и CSV"),
+    ("export", "Выгрузить записи: Markdown, CSV, календарь"),
     ("backup", "Прислать файл базы"),
     ("cancel", "Прервать мастер /new"),
     ("ping", "Проверить, жив ли бот"),
 ]
+
+# Справка. До неё узнать про `+`, про реплай и про кнопку «🎤 Голосом» было
+# неоткуда: меню команд перечисляет только команды, а всё остальное описано в
+# README, которого в чате никто не читает. Молчание бота на обычную реплику при
+# этом читается как поломка — поэтому первым делом объясняем, когда он слушает.
+HELP = (
+    "🤖 <b>Как со мной разговаривать</b>\n\n"
+    "Я не читаю обычную переписку семьи — только то, что адресовано мне. "
+    "Обратиться можно тремя способами:\n"
+    "• начать сообщение с <code>+</code>: "
+    "<code>+купить молоко завтра к 19</code>\n"
+    "• ответить реплаем на любое моё сообщение\n"
+    "• упомянуть меня по имени\n\n"
+    "Из фразы я сам пойму, что это — задача, заметка, событие или покупка, "
+    "и когда о ней напомнить. Перед сохранением покажу карточку: там можно "
+    "поправить дату, текст и тип, а можно отменить. "
+    "<b>Без вашего нажатия я не сохраняю ничего.</b>\n\n"
+    "🎤 <b>Голосом.</b> Нажмите кнопку «🎤 Голосом» и запишите голосовое "
+    "следующим сообщением — разберу его так же, как текст.\n\n"
+    "📌 <b>Панель «Сегодня»</b> — закреплённое сообщение, я держу его "
+    "в актуальном виде сам.\n\n"
+    "✏️ <b>Записанное можно исправить:</b> в /tasks, /notes и /events "
+    "у каждой строки есть «✏️» — там правка текста, перенос, удаление "
+    "(с откатом) и «👤 Кому» — кому в семье поручено. Поручение никого "
+    "ни в чём не ограничивает: закрыть и поправить может любой.\n\n"
+    "🛒 <b>Покупки:</b> <code>/buy молоко, хлеб</code> добавит сразу "
+    "несколько. Тап по строке вычёркивает, повторный — возвращает.\n\n"
+    "☀️ Каждое утро присылаю план на день, а следом — что просрочено. "
+    "Время сводки и таймзона — в /settings.\n\n"
+    "Все команды — в меню рядом с полем ввода."
+)
 
 PRIVATE_CHAT = (
     "Я работаю в общем семейном чате, а не в личке. "
@@ -90,6 +146,14 @@ MAX_WEEK_ITEMS = 30
 # десять записей с длинными заголовками и телами дают под 17 000 символов
 MESSAGE_LIMIT = 4096
 
+# Сколько символов `digest.build_day` оставляет нетронутыми под рамки, в которые
+# его текст потом заворачивают. Сам он их не видит: одну и ту же сборку берут
+# утренняя сводка (`DIGEST_HEADER` 42 + `DIGEST_LATE_NOTE` 48), `/today` (без
+# рамки вовсе) и живая панель (86). Плюс собственные заголовки дня и
+# «Просрочено», плюс строка про покупки (до 120). Считаем по худшему из
+# потребителей и берём запас: ошибка здесь стоит не строки, а всего сообщения
+DAY_RESERVE = 400
+
 DONE_CONFIRMED = "Готово: {title}"
 # У заметки «Готово» звучит странно — её не выполняют, а убирают с глаз.
 # Механизм тот же (`status='done'`), а слово должно быть своё
@@ -137,6 +201,12 @@ CAPTURE_RRULE_BAD = (
 # думая, что видит обычный
 CAPTURE_VIA_FALLBACK = (
     "<i>Разобрал без ИИ — только дату и текст. Проверьте внимательнее.</i>"
+)
+# Суточный лимит модели исчерпан. Говорим вслух, потому что молчание тут
+# неотличимо от поломки: разбор просто становится хуже, а почему — неясно
+CAPTURE_QUOTA_SPENT = (
+    "На сегодня лимит обращений к ИИ исчерпан — разберу попроще, "
+    "только дату и текст. Завтра будет как обычно."
 )
 CAPTURE_RECURRING_FALLBACK = (
     "Модель сейчас недоступна, а повтор («каждый вторник») простым разбором "
@@ -269,6 +339,12 @@ ENTRY_DELETED = "Удалил: {title}"
 ENTRY_RESTORED = "Вернул: {title}"
 ENTRY_DATE_SAVED = "Срок теперь {when}."
 ENTRY_DATE_CLEARED = "Убрал срок."
+# Поручение. Ролей и прав оно не заводит — закрыть и поправить запись
+# по-прежнему может любой участник чата; это подпись, а не разрешение
+ENTRY_ASSIGNED = "👤 Поручено: {name}"
+ENTRY_ASK_WHO = "Кому поручить «{title}»?"
+ENTRY_WHO_SAVED = "Поручил: {name}"
+ENTRY_WHO_CLEARED = "Снял поручение."
 # Своё «устарело»: `DONE_ALREADY` говорит «уже закрыта» и про удалённую врёт,
 # а `REVIEW_STALE` поминает разбор, которого здесь нет
 ENTRY_GONE = "Этой записи больше нет."
@@ -277,6 +353,15 @@ ENTRY_EDIT_FAILED = "Не смог обновить карточку — поп�
 
 def entry_ask_delete(title: str) -> str:
     return ENTRY_ASK_DELETE.format(title=_escape(title[:60]))
+
+
+def entry_ask_who(title: str) -> str:
+    return ENTRY_ASK_WHO.format(title=_escape(title[:60]))
+
+
+def entry_who_saved(name: str) -> str:
+    """Имя задаёт человек в профиле Telegram — значит через `_escape`."""
+    return ENTRY_WHO_SAVED.format(name=_escape(name))
 
 
 def entry_deleted(title: str) -> str:
@@ -405,29 +490,58 @@ def entry_line(
 
     when = _when_part(entry, tz, now, show_date)
     head = f"{icon} {fmt.bold(when)} {title}" if when else f"{icon} {title}"
-    return f"{head} — {_author_suffix(entry, tz, now)}"
+    return f"{head}{_assignee_part(entry)} — {_author_suffix(entry, tz, now)}"
+
+
+# Поручение в строке списка — «👤 Аня» перед подписью автора. Значок обязателен:
+# без него в строке оказываются два имени подряд («Аня — Миша, вчера в 21:14»),
+# и кто из них кому — неясно. У закрытой записи не показываем: дело сделано, а
+# лишние десять символов в списке из пятнадцати строк — это лишний экран
+def _assignee_part(entry: Entry) -> str:
+    if entry.assignee is None or entry.status != "open":
+        return ""
+    return f" 👤 {fmt.bold(_escape(entry.assignee.display_name))}"
 
 
 def entry_lines(
-    entries,
+    entries: Sequence[Entry],
     tz: str,
     now: datetime | None = None,
     *,
     limit: int,
     show_date: bool = True,
+    budget: int = MESSAGE_LIMIT,
 ) -> list[str]:
     """Строки списка с обрезанным хвостом.
 
     Без потолка сообщение рано или поздно перерастает 4096 символов, Telegram
     отвечает `TelegramBadRequest`, и дайджест пропадает молча — навсегда, потому
     что `last_digest_on` при этом всё равно проставляется.
+
+    Потолков **два, и одного мало**. `limit` считает записи, `budget` — символы.
+    Заголовок задаёт человек: `String(500)` на запись при `MAX_DAY_ITEMS = 15`
+    даёт 7500 символов, то есть счёт по записям от лимита Telegram не спасает.
+
+    Режем целыми строками: `_escape` раздувает «<» вчетверо, и обрыв внутри
+    «&amp;» даёт `can't parse entities` — потерю всего сообщения вместо потери
+    одной строки. Хвост «и ещё N» считается **до** обрезки и им же меряется
+    длина, иначе он сам может не поместиться (урок `shopping_panel`).
+
+    `budget` — сколько символов остаётся под сами строки: вызывающий вычитает
+    из `MESSAGE_LIMIT` свои заголовки и футеры.
     """
-    lines = [
-        entry_line(e, tz, now, show_date=show_date) for e in entries[:limit]
-    ]
-    if len(entries) > limit:
-        lines.append(MORE_ITEMS.format(count=len(entries) - limit))
-    return lines
+    shown: list[str] = []
+    total = len(entries)
+    for entry in entries[:limit]:
+        line = entry_line(entry, tz, now, show_date=show_date)
+        probe = [*shown, line, MORE_ITEMS.format(count=total)]
+        if len("\n".join(probe)) > budget:
+            break
+        shown.append(line)
+
+    if len(shown) < total:
+        shown.append(MORE_ITEMS.format(count=total - len(shown)))
+    return shown
 
 
 def _source_url(entry: Entry) -> str | None:
@@ -457,6 +571,12 @@ def entry_card(entry: Entry, tz: str, now: datetime | None = None) -> str:
     when = _when_part(entry, tz, now, show_date=True)
     if when:
         lines.append(f"📅 {when}")
+    if entry.assignee is not None:
+        # В карточке — отдельной строкой и даже у закрытой записи: здесь место
+        # есть, и «кому было поручено» — часть истории записи
+        lines.append(
+            ENTRY_ASSIGNED.format(name=_escape(entry.assignee.display_name))
+        )
     url = _source_url(entry)
     if url:
         lines.append(SOURCE_LINK.format(url=url))
@@ -464,7 +584,7 @@ def entry_card(entry: Entry, tz: str, now: datetime | None = None) -> str:
     return "\n".join(lines)
 
 
-def is_past(item, tz: str, now: datetime | None = None) -> bool:
+def is_past(item: Parsed, tz: str, now: datetime | None = None) -> bool:
     """Срок разобранной записи уже прошёл (шаг 3b.2).
 
     Зовут двое: рендер карточки — чтобы поставить `⚠️`, и хендлер — чтобы
@@ -483,7 +603,13 @@ def is_past(item, tz: str, now: datetime | None = None) -> bool:
     return tu.to_utc(item.due_at, tz) < moment
 
 
-def capture_card(items, tz: str, now: datetime | None = None, *, via: str = "llm") -> str:
+def capture_card(
+    items: Sequence[Parsed],
+    tz: str,
+    now: datetime | None = None,
+    *,
+    via: str = "llm",
+) -> str:
     """Превью разбора до сохранения (шаг 3a.6).
 
     Отдельно от `entry_card`, потому что тот принимает уже сохранённый `Entry`
@@ -505,7 +631,7 @@ def capture_card(items, tz: str, now: datetime | None = None, *, via: str = "llm
     return "\n\n".join(blocks)
 
 
-def _item_block(item, tz: str, now: datetime | None) -> str:
+def _item_block(item: Parsed, tz: str, now: datetime | None) -> str:
     icon = KIND_ICONS.get(item.kind, "•")
     name = KIND_NAMES.get(item.kind, item.kind)
     lines = [f"{icon} <b>{name}:</b> {_escape(item.title)}"]
@@ -530,7 +656,7 @@ def _item_block(item, tz: str, now: datetime | None) -> str:
     return "\n".join(lines)
 
 
-def day_header(day, tz: str, now: datetime | None = None) -> str:
+def day_header(day: date, tz: str, now: datetime | None = None) -> str:
     today = tu.local_today(tz, now)
     label = tu.day_label(day, today)
     stamp = tu.day_stamp(day)
@@ -575,7 +701,7 @@ REMIND_OK = "🔔 Напомню {when}: {text}"
 
 
 def reminder_message(
-    reminder, tz: str, now: datetime | None = None, *, late: bool = False
+    reminder: Reminder, tz: str, now: datetime | None = None, *, late: bool = False
 ) -> str:
     """Само напоминание. Текст пишет человек — только через экранирование."""
     body = _escape(reminder.text)
@@ -584,7 +710,7 @@ def reminder_message(
     return REMINDER_LATE.format(text=body, when=tu.fmt_due(reminder.fire_at, tz, now=now))
 
 
-def missed_summary(reminders, tz: str, now: datetime | None = None) -> str:
+def missed_summary(reminders: Sequence[Reminder], tz: str, now: datetime | None = None) -> str:
     """Одно сообщение вместо пачки: ПК был выключен дольше порога сводки."""
     lines = [MISSED_HEADER.format(count=len(reminders))]
     for reminder in reminders[:MAX_SUMMARY_ITEMS]:
@@ -662,7 +788,8 @@ LIST_CLOSED = "Список закрыт. Следующий начнётся с
 # враньём. Про кнопку сказано прямо: закрытие липкое, и без неё остаток
 # недостижим
 LIST_CLOSED_FOOTER = (
-    "<i>Список закрыт, но куплено не всё. Верните его в работу кнопкой ниже или начните новый: /buy</i>"
+    "<i>Список закрыт, но куплено не всё. Верните его в работу кнопкой ниже "
+    "или начните новый: /buy</i>"
 )
 BTN_CLOSE_LIST = "🧹 Список закрыт"
 BTN_REOPEN_LIST = "↩️ Вернуть в работу"
@@ -691,7 +818,7 @@ def shopping_line(entry: Entry, tz: str, now: datetime | None = None) -> str:
 
 def shopping_panel(
     name: str,
-    entries,
+    entries: Sequence[Entry],
     tz: str,
     now: datetime | None = None,
     *,
@@ -776,6 +903,12 @@ BACKUP_TOO_BIG = (
 )
 
 EXPORT_CAPTION = "Выгрузка на {day}: записей — {count}."
+# У календаря подпись своя: в него попадают только записи со сроком, и без
+# оговорки «событий — 4» рядом с «записей — 32» читается как потеря данных
+EXPORT_ICS_CAPTION = (
+    "Календарь: событий со сроком — {count}. "
+    "Откройте файл в календаре телефона, чтобы добавить их туда."
+)
 EXPORT_TOO_BIG = (
     "Выгрузка выросла до {size} МБ — Telegram столько от бота не примет. "
     "Заберите базу целиком: /backup."
@@ -797,3 +930,7 @@ def export_too_big(size_bytes: int) -> str:
 
 def export_caption(day: date, count: int) -> str:
     return EXPORT_CAPTION.format(day=day.isoformat(), count=count)
+
+
+def export_ics_caption(count: int) -> str:
+    return EXPORT_ICS_CAPTION.format(count=count)

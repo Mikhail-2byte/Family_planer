@@ -243,8 +243,12 @@ async def _open(
             await message.answer(texts.BUY_USAGE, reply_markup=kb.main_keyboard())
             return
         # Человек попросил показать список — значит должен его увидеть, а не
-        # получить правку сообщения, уехавшего вверх по истории
-        await _show(bot, session, family, lst, message, force_new=True)
+        # получить правку сообщения, уехавшего вверх по истории.
+        # Лок по той же причине, что в `tick` и `refresh_panel`: `_show` читает
+        # состояние, рисует и правит, а между чтением и правкой успевает влезть
+        # чужой тап по чекбоксу
+        async with _locks.setdefault(lst.id, asyncio.Lock()):
+            await _show(bot, session, family, lst, message, force_new=True)
         return
 
     lst = await repo.get_or_create_active_list(session, family.id)
@@ -265,7 +269,11 @@ async def _open(
         list_id=lst.id,
         titles=titles[:room],
     )
-    await _show(bot, session, family, lst, message, force_new=False)
+    # Тот же лок: `_show` здесь ещё и пишет `panel_message_id`, и два
+    # одновременных `/buy` без него перевыпустили бы две панели, оставив в базе
+    # id второй — первая осталась бы в чате живой кнопками, но безымянной
+    async with _locks.setdefault(lst.id, asyncio.Lock()):
+        await _show(bot, session, family, lst, message, force_new=False)
     panel.schedule(bot, family.id, message.message_id)
 
 

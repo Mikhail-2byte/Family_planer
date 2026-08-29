@@ -59,8 +59,16 @@ async def _debounced(bot: Bot, family_id: int, last_message_id: int | None) -> N
     await asyncio.sleep(settings.panel_debounce_seconds)
     # Дальше отменять нечего: работа началась, и обрыв посреди правки оставил бы
     # панель рассинхронизированной с базой. У следующего `schedule` будет своя
-    # задача, а лок выстроит их в очередь
-    _tasks.pop(family_id, None)
+    # задача, а лок выстроит их в очередь.
+    #
+    # Снимаем **только себя**, а не ключ вслепую. Отмена доставляется не в
+    # момент `cancel()`, а на ближайшем `await`: задача, уже досыпавшая `sleep`,
+    # но ещё не получившая управление, успевает дойти сюда после того, как
+    # `schedule` положил под тот же ключ новую. Безусловный `pop` вычёркивал бы
+    # из словаря её — а вместе с ней и сильную ссылку, ради которой словарь
+    # заведён, и возможность отменить её следующим `schedule`, то есть сам дебаунс
+    if _tasks.get(family_id) is asyncio.current_task():
+        del _tasks[family_id]
     try:
         await refresh(bot, family_id, last_message_id)
     except Exception:
@@ -82,12 +90,11 @@ async def refresh(
     """
     # Сначала лок, потом сессия: стоять в очереди, держа соединение SQLite,
     # незачем — тикер пишет в ту же базу
-    async with _locks.setdefault(family_id, asyncio.Lock()):
-        async with Session() as session:
-            family = await repo.get_family_by_id(session, family_id)
-            if family is None:
-                return
-            await _redraw(bot, session, family, last_message_id, now or tu.now_utc())
+    async with _locks.setdefault(family_id, asyncio.Lock()), Session() as session:
+        family = await repo.get_family_by_id(session, family_id)
+        if family is None:
+            return
+        await _redraw(bot, session, family, last_message_id, now or tu.now_utc())
 
 
 async def refresh_stale(

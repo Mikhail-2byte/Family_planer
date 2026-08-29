@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 from contextlib import suppress
+from logging.handlers import RotatingFileHandler
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -15,9 +16,53 @@ from bot.handlers import routers
 from bot.middlewares import FamilyMiddleware
 from bot.services import panel, ticker
 
+# Файл пишем сами, а не редиректом shell, и это не удобство. При `>> bot.log`
+# кодировку выбирает Python по локали Windows, а не по кодовой странице консоли:
+# получался файл, где часть строк cp866, часть utf-8, и целиком его не читал ни
+# один декодер — на боевой машине логи были потеряны как класс. Здесь кодировка
+# задана явно, а заодно появляется ротация, которой у редиректа нет вовсе
+# («чистить руками раз в полгода» из README).
+LOG_PATH = settings.db_path.parent / "bot.log"
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUPS = 3
+
+
+def _log_handlers() -> list[logging.Handler]:
+    """Консоль всегда, файл — если получится его открыть.
+
+    Сбой файла не должен мешать боту стартовать, и это не осторожность впрок:
+    ровно так он и упал при первом же боевом перезапуске 29.08.2026. Старый
+    `cmd.exe` ещё держал `bot.log` открытым по редиректу, новый процесс получил
+    `PermissionError` — и умер **на импорте модуля**, не дойдя до `main`.
+    Причин для отказа хватает и без миграции: полный диск, антивирус, права.
+
+    Логи — вещь побочная, как `parse_log`: терять из-за них семейного бота
+    нельзя. Без файла он работает, просто лог остаётся только в консоли.
+    """
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        # Каталог заводит и `bot.db.session` на импорте, но полагаться на
+        # порядок импортов ради файла логов не стоит
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(
+            RotatingFileHandler(
+                LOG_PATH,
+                maxBytes=LOG_MAX_BYTES,
+                backupCount=LOG_BACKUPS,
+                encoding="utf-8",
+            )
+        )
+    except OSError as exc:
+        # До `basicConfig` логгера ещё нет — пишем напрямую в stderr
+        print(f"Лог-файл {LOG_PATH} недоступен ({exc}); пишу только в консоль",
+              file=sys.stderr)
+    return handlers
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    handlers=_log_handlers(),
 )
 log = logging.getLogger("bot")
 

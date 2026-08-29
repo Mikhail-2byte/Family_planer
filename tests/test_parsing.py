@@ -276,3 +276,37 @@ def test_broken_confidence_becomes_zero(bad):
 def test_low_confidence_is_flagged():
     assert _one(confidence=0.2).uncertain
     assert not _one(confidence=0.9).uncertain
+
+
+# --- Явная просьба записать внутри разговора -----------------------------------
+#
+# Осечка с боевого `parse.log` (29.08.2026, 06:28): расшифровка голосового на
+# 512 символов начиналась словами «Запиши в заметке наши оценки…», а модель
+# вернула `intent=chitchat` и `items=[]`. Запись потеряна, человеку сказано
+# «понял, но записывать нечего». Промпту не хватало правила о том, что явная
+# просьба перевешивает разговорный тон остального текста.
+#
+# Тестами модель не проверить — здесь стережём, что правило из промпта не
+# пропадёт при следующей его правке.
+
+
+def _system() -> str:
+    return build_system(NOW, MSK, ["Аня"], ["Покупки"])
+
+
+def test_prompt_says_an_explicit_ask_outweighs_the_chatter():
+    system = _system()
+    assert "перевешивает" in system
+    for word in ("запиши", "добавь", "напомни"):
+        assert word in system
+
+
+def test_prompt_warns_about_voice_transcripts():
+    """Расшифровка голосового — главный источник длинных разговорных фраз."""
+    assert "расшифровк" in _system().lower()
+
+
+def test_prompt_asks_for_a_short_title_not_the_whole_transcript():
+    """Иначе заголовком станет вся расшифровка на 512 символов."""
+    system = _system()
+    assert "title" in system and "не вся расшифровка" in system

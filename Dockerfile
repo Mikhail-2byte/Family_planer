@@ -6,9 +6,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Зависимости отдельным слоем — код меняется чаще, чем requirements.txt
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Зависимости отдельным слоем — код меняется чаще, чем список пакетов.
+# Ставим из слепка, а не из диапазонов: образ пересобирается когда придётся, и
+# `aiogram>=3.31,<4` втянул бы тот минор, который вышел к этому дню. Чем
+# обновлять — сказано в шапке requirements.lock
+COPY requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
 
 COPY alembic.ini ./
 COPY alembic ./alembic

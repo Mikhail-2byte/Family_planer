@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bot.db import repo
 from bot.db.models import Base
-from bot.services import panel, parse_log
+from bot.services import panel, parse_log, ticker
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +19,22 @@ def _parse_log(tmp_path, monkeypatch):
     считается стоимость этапа 3b.8 — тестовые вызовы завысили бы её вдвое.
     """
     monkeypatch.setattr(parse_log, "PATH", tmp_path / "parse.log")
+    # Счётчик суточных обращений к модели — модульное состояние, и без сброса
+    # он течёт между тестами: один пишет строку разбора, другой упирается в
+    # лимит на пустом логе
+    monkeypatch.setattr(parse_log, "_counted_day", None)
+    monkeypatch.setattr(parse_log, "_counted", 0)
+
+
+@pytest.fixture(autouse=True)
+def _heartbeat(tmp_path, monkeypatch):
+    """Отметка живого цикла на время теста уводится в tmp.
+
+    Тот же довод, что у `parse_log`: `ticker.run` зовут два теста, и без
+    подмены прогон трогал бы `data/heartbeat`, по которому Docker судит о
+    здоровье боевого бота.
+    """
+    monkeypatch.setattr(ticker, "HEARTBEAT", tmp_path / "heartbeat")
 
 
 @pytest_asyncio.fixture(autouse=True)

@@ -472,7 +472,9 @@ async def test_closing_a_note_redraws_notes_not_tasks(session, family, anya, bot
     note = await repo.create_entry(
         session, family_id=family.id, author_id=anya.id, kind="note", title="заметка"
     )
-    other = await repo.create_entry(
+    # Третья запись нужна тем, что она есть: без неё страница после закрытия
+    # заметки оказалась бы пустой, и проверять было бы нечего
+    await repo.create_entry(
         session, family_id=family.id, author_id=anya.id, kind="note", title="вторая"
     )
 

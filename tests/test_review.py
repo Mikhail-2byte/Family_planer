@@ -8,6 +8,7 @@ from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from bot import keyboards as kb
 from bot import texts
@@ -16,7 +17,6 @@ from bot.db.models import Reminder
 from bot.handlers import review as handler
 from bot.services import digest, entries, review, sending
 from bot.services import timeutil as tu
-from sqlalchemy import select
 
 MSK = "Europe/Moscow"
 NOW = datetime(2026, 8, 27, 9, 0)  # 12:00 по Москве, четверг
@@ -131,7 +131,7 @@ async def test_extra_entries_are_cut_and_counted(session, family, overdue):
 @pytest.mark.asyncio
 async def test_long_titles_do_not_break_the_limit(session, family, overdue):
     """Потолок по числу записей длину не ограничивает: title — 500 символов."""
-    for i in range(texts.MAX_REVIEW_ITEMS):
+    for _ in range(texts.MAX_REVIEW_ITEMS):
         await overdue("я" * 500)
 
     entries = await review.overdue(session, family, NOW)

@@ -6,7 +6,7 @@ from itertools import groupby
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards as kb
@@ -24,7 +24,9 @@ router.callback_query.filter(IN_GROUP_CB)
 PAGE_SIZE = 8
 
 
-async def edit_or_ignore(call: CallbackQuery, text: str, markup) -> None:
+async def edit_or_ignore(
+    call: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None
+) -> None:
     """Перерисовать сообщение, стерпев «message is not modified».
 
     Двое могут тапнуть одну и ту же кнопку на одном сообщении: второй `edit_text`
@@ -95,7 +97,12 @@ async def cmd_week(message: Message, session: AsyncSession, family: Family) -> N
     if len(ordered) > len(shown):
         blocks.append(texts.MORE_ITEMS.format(count=len(ordered) - len(shown)))
 
-    await message.answer("\n\n".join(blocks), reply_markup=kb.main_keyboard())
+    # `MAX_WEEK_ITEMS` считает записи, а длину строки задаёт человек: тридцать
+    # заголовков по 500 символов перерастают 4096, и Telegram ответит отказом,
+    # а не обрезкой. Отбрасываем целыми днями — рвать HTML посередине нельзя
+    await message.answer(
+        texts.join_under_limit(blocks), reply_markup=kb.main_keyboard()
+    )
 
 
 # Вид страницы ↔ тип записи. Таблицей, а не тернарниками: с приходом `/events`
@@ -130,7 +137,7 @@ def view_of(entry: Entry) -> str:
 
 async def _render_page(
     session: AsyncSession, family: Family, view: str, offset: int
-) -> tuple[str, object]:
+) -> tuple[str, InlineKeyboardMarkup | None]:
     kind = KIND_BY_VIEW.get(view, "task")
     # У заметок статус фильтруется с тех пор, как у них появилась кнопка
     # закрытия: иначе закрытая заметка оставалась бы в списке с мёртвой кнопкой
@@ -265,13 +272,28 @@ async def cmd_find(
         return
 
     now = tu.now_utc()
-    blocks = [
-        texts.search_header(query, len(found)),
-        "\n".join(texts.entry_line(e, family.tz, now) for e in found),
-    ]
-    if len(found) == repo.SEARCH_LIMIT:
+    header = texts.search_header(query, len(found))
+    footer = (
         # Иначе заголовок «Найдено: 20» выглядит как точное число совпадений
-        blocks.append(texts.SEARCH_TRUNCATED.format(limit=repo.SEARCH_LIMIT))
+        texts.SEARCH_TRUNCATED.format(limit=repo.SEARCH_LIMIT)
+        if len(found) == repo.SEARCH_LIMIT
+        else ""
+    )
+    # `SEARCH_LIMIT` считает записи, а не символы: двадцать заголовков по 500
+    # символов дают 10 000 и отказ Telegram, то есть потерю всей выдачи.
+    # Бюджет — то, что остаётся после заголовка и хвоста; оба считаются до
+    # обрезки, иначе хвост может сам не поместиться
+    spent = len(header) + len(footer) + 2  # два перевода строки между блоками
+    lines = texts.entry_lines(
+        found,
+        family.tz,
+        now,
+        limit=repo.SEARCH_LIMIT,
+        budget=texts.MESSAGE_LIMIT - spent,
+    )
+    blocks = [header, "\n".join(lines)]
+    if footer:
+        blocks.append(footer)
     await message.answer("\n".join(blocks), reply_markup=kb.main_keyboard())
 
 

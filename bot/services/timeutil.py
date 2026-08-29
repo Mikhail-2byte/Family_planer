@@ -7,7 +7,7 @@
 как первый из двух — `fold=0`, поведение Python по умолчанию.
 """
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 MONTHS_SHORT = (
@@ -23,18 +23,18 @@ def tz_of(tz_name: str) -> ZoneInfo:
 
 def now_utc() -> datetime:
     """Текущий момент в UTC без tzinfo — в том же виде, в каком лежит в БД."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def to_utc(local_dt: datetime, tz_name: str) -> datetime:
     """Наивное локальное время семьи → наивный UTC."""
     aware = local_dt.replace(tzinfo=tz_of(tz_name))
-    return aware.astimezone(timezone.utc).replace(tzinfo=None)
+    return aware.astimezone(UTC).replace(tzinfo=None)
 
 
 def to_local(utc_dt: datetime, tz_name: str) -> datetime:
     """Наивный UTC из БД → наивное локальное время семьи."""
-    aware = utc_dt.replace(tzinfo=timezone.utc)
+    aware = utc_dt.replace(tzinfo=UTC)
     return aware.astimezone(tz_of(tz_name)).replace(tzinfo=None)
 
 

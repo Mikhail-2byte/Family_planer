@@ -28,10 +28,10 @@
 
 import logging
 from dataclasses import dataclass, replace
-from datetime import datetime, time
+from datetime import datetime
 
 from aiogram import Bot, Router
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards as kb
@@ -98,7 +98,7 @@ def _forget(key: tuple[int, int]) -> None:
     _pending.pop(key, None)
 
 
-def _card(draft: Draft, tz: str) -> tuple[str, object]:
+def _card(draft: Draft, tz: str) -> tuple[str, InlineKeyboardMarkup | None]:
     """Текст карточки и клавиатура к нему — всегда вместе.
 
     Подпись кнопки зависит от того же, что и `⚠️` в тексте (шаг 3b.2), поэтому
@@ -145,18 +145,16 @@ async def edit_field(message: Message, family: Family, bot: Bot) -> None:
     elif raw.lower() in NO_DATE_WORDS:
         draft.items[0] = replace(item, due_at=None, all_day=False)
     else:
-        parsed = nlp.parse_when(raw, tu.to_local(tu.now_utc(), family.tz))
+        now_local = tu.to_local(tu.now_utc(), family.tz)
+        parsed = nlp.parse_when(raw, now_local)
         if parsed is None:
             _pending[key] = field
             await message.reply(texts.CAPTURE_BAD_DATE)
             return
-        draft.items[0] = replace(
-            item,
-            due_at=parsed.when,
-            # Названа дата без времени — это «весь день». Тот же вывод, что
-            # делает `parsing._item` для ответа модели
-            all_day=parsed.when.time() == time(0, 0),
-        )
+        # Тот же `as_due`, что в `_fallback`: «завтра», отвеченное на карточку в
+        # 14:37, обязано дать «завтра, весь день», а не «завтра в 14:37»
+        due_at, all_day = nlp.as_due(parsed.when, now_local)
+        draft.items[0] = replace(item, due_at=due_at, all_day=all_day)
 
     draft.edited = True
     text, markup = _card(draft, family.tz)
@@ -203,6 +201,17 @@ async def handle_phrase(
         [shopping.name] if shopping else [],
     )
 
+    if _quota_spent():
+        # Суточный лимит бесплатного тира — на аккаунт, а не на ключ. Дойдя до
+        # него, провайдер просто начинает отвечать 429, и разбор молча
+        # деградирует до `dateparser`; человек видит «разобрал без ИИ» и думает,
+        # что сломалась сеть. Останавливаемся сами и говорим об этом вслух —
+        # заодно не тратим три попытки с паузами на заведомый отказ
+        log.warning("Суточный лимит модели исчерпан: %s", parse_log.calls_today())
+        await message.answer(texts.CAPTURE_QUOTA_SPENT)
+        await _fallback(message, text, family)
+        return
+
     raw = await llm.ask(system, text)
     if raw is None:
         # Сеть, ключ, отказ провайдера — наружу всё это приходит одинаково
@@ -238,6 +247,17 @@ async def handle_phrase(
         await _autosave(message, draft, session, family, member, bot)
         return
     await _show_card(message, draft, family.tz)
+
+
+def _quota_spent() -> bool:
+    """Суточный лимит обращений к модели исчерпан?
+
+    Считает только текстовый разбор: голос уходит в Groq, у которого своя
+    квота, — ровно ради этого он и разведён с OpenRouter. `0` в настройке
+    выключает проверку: у платного ключа суточного потолка нет.
+    """
+    limit = settings.llm_daily_limit
+    return bool(limit) and parse_log.calls_today() >= limit
 
 
 def _has_shopping(draft: Draft) -> bool:
@@ -312,22 +332,7 @@ async def _fallback(message: Message, payload: str, family: Family) -> None:
         await message.answer(texts.CAPTURE_FAILED)
         return
 
-    # Время, которого никто не называл, `dateparser` берёт из «сейчас»: сказано
-    # «завтра» в 14:37 — получите «завтра в 14:37». Показать придуманное время
-    # хуже, чем показать один день: человек подтверждает карточку кнопкой и
-    # унесёт выдумку в базу. Признак «время не названо» — совпадение часа и
-    # минуты с текущими; цена — «через сутки» тоже станет записью на весь день,
-    # но это куда более редкая фраза, чем «завтра»
-    invented = (parsed.when.hour, parsed.when.minute) == (
-        now_local.hour,
-        now_local.minute,
-    )
-    all_day = invented or parsed.when.time() == time(0, 0)
-    due_at = (
-        parsed.when.replace(hour=0, minute=0, second=0, microsecond=0)
-        if all_day
-        else parsed.when
-    )
+    due_at, all_day = nlp.as_due(parsed.when, now_local)
 
     parse_log.write(
         event="parse",
@@ -418,6 +423,13 @@ async def tap(
 
     if action in ("date", "text"):
         await _ask_edit(call, key, draft, family, action)
+        return
+
+    # Ветка «иначе» обязательна: без ответа на колбэк у нажавшего крутится
+    # индикатор до таймаута Telegram. Сюда попадает только значение
+    # `CaptureCB.action`, которого ещё нет выше, — то есть добавленное позже
+    log.warning("Неизвестное действие карточки: %r", action)
+    await call.answer()
 
 
 async def _ask_edit(

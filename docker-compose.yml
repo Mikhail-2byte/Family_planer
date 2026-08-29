@@ -10,6 +10,17 @@ services:
       # пересборка нужна только при смене requirements.txt или Dockerfile
       - ./bot:/app/bot:ro
       - ./alembic:/app/alembic:ro
+    # Процесс, упавший внутрь себя (long polling встал, а PID жив),
+    # `restart: unless-stopped` не поднимет: для Docker контейнер здоров, пока
+    # жив PID 1. Признак живого цикла даёт `data/heartbeat` — тикер трогает его
+    # раз в `TICK_SECONDS`. По `bot.log` проверять нельзя: в спокойный тик бот
+    # не пишет ни строки, и здоровый бот выглядел бы мёртвым
+    healthcheck:
+      test: ["CMD-SHELL", "find /app/data/heartbeat -mmin -5 | grep -q ."]
+      interval: 2m
+      timeout: 10s
+      start_period: 2m
+      retries: 3
     logging:
       driver: json-file
       options:

@@ -162,7 +162,8 @@ async def test_all_entries_takes_items_without_due_date(session, family, anya):
 
 
 @pytest.mark.asyncio
-async def test_export_sends_two_files(session, family, anya):
+async def test_export_sends_all_three_files(session, family, anya):
+    """Календарь третьим — у записи из `_entry` есть срок, значит он не пуст."""
     await _entry(session, family, anya)
     message = FakeMessage()
 
@@ -170,7 +171,7 @@ async def test_export_sends_two_files(session, family, anya):
 
     stem = f"family-{tu.local_today(family.tz).isoformat()}"
     names = [document.filename for document, _ in message.documents]
-    assert names == [f"{stem}.md", f"{stem}.csv"]
+    assert names == [f"{stem}.md", f"{stem}.csv", f"{stem}.ics"]
 
 
 @pytest.mark.asyncio
@@ -292,3 +293,156 @@ async def test_export_refuses_a_file_too_big_for_telegram(
 
     assert message.documents == []
     assert message.texts and message.texts[0].startswith("Выгрузка выросла")
+
+
+# --- Календарь (.ics) ---------------------------------------------------------
+#
+# Односторонняя выгрузка вместо отменённой интеграции с Google Календарём:
+# события видны в любом календаре, а OAuth и `token.json` не нужны.
+
+
+def _events(payload: bytes) -> list[dict[str, str]]:
+    """Разобрать .ics в список событий. Наивно, но ровно под наш же формат."""
+    text = payload.decode("utf-8")
+    # Снимаем перенос длинных строк, прежде чем читать: продолжение начинается
+    # с пробела — так же, как это делают настоящие календари
+    unfolded = text.replace("\r\n ", "")
+    events, current = [], None
+    for line in unfolded.split("\r\n"):
+        if line == "BEGIN:VEVENT":
+            current = {}
+        elif line == "END:VEVENT":
+            events.append(current)
+            current = None
+        elif current is not None and ":" in line:
+            key, value = line.split(":", 1)
+            current[key] = value
+    return events
+
+
+@pytest.mark.asyncio
+async def test_ics_has_a_valid_envelope(session, family, anya):
+    await _entry(session, family, anya)
+    entries = await repo.all_entries(session, family.id)
+
+    payload = export.to_ics(entries, family.tz, "Семья", datetime(2026, 8, 29, 6, 0))
+    text = payload.decode("utf-8")
+
+    assert text.startswith("BEGIN:VCALENDAR\r\n")
+    assert text.endswith("END:VCALENDAR\r\n")
+    assert "VERSION:2.0" in text
+    # CRLF — требование RFC, и не формальное: часть календарей на голом \n
+    # молча показывает пустой файл
+    assert "\n" not in text.replace("\r\n", "")
+
+
+@pytest.mark.asyncio
+async def test_ics_keeps_time_and_all_day_apart(session, family, anya):
+    """Запись «на весь день» обязана стать полосой на день, а не встречей в полночь."""
+    await _entry(session, family, anya, title="Встреча")
+    await _entry(
+        session,
+        family,
+        anya,
+        title="Отпуск",
+        all_day=True,
+        due_at=datetime(2026, 9, 1, 0, 0),
+    )
+    entries = await repo.all_entries(session, family.id)
+
+    events = _events(
+        export.to_ics(entries, family.tz, "Семья", datetime(2026, 8, 29, 6, 0))
+    )
+    by_title = {e["SUMMARY"]: e for e in events}
+
+    assert by_title["Встреча"]["DTSTART"] == "20260828T160000Z"
+    assert by_title["Отпуск"]["DTSTART;VALUE=DATE"] == "20260901"
+
+
+@pytest.mark.asyncio
+async def test_ics_skips_entries_without_a_due_date(session, family, anya):
+    """Заметке без срока в календаре места нет, а пустая дата ломает файл."""
+    await _entry(session, family, anya, kind="note", title="Без срока", due_at=None)
+    await _entry(session, family, anya, title="Со сроком")
+    entries = await repo.all_entries(session, family.id)
+
+    events = _events(
+        export.to_ics(entries, family.tz, "Семья", datetime(2026, 8, 29, 6, 0))
+    )
+    assert [e["SUMMARY"] for e in events] == ["Со сроком"]
+
+
+@pytest.mark.asyncio
+async def test_ics_omits_deleted_entries(session, family, anya):
+    """В отличие от CSV и Markdown: те — слепок базы, календарь — инструмент."""
+    entry = await _entry(session, family, anya, title="Выброшено")
+    await repo.archive_entry(session, entry.id, family.id)
+    entries = await repo.all_entries(session, family.id)
+
+    events = _events(
+        export.to_ics(entries, family.tz, "Семья", datetime(2026, 8, 29, 6, 0))
+    )
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_ics_escapes_special_characters(session, family, anya):
+    r"""Запятая и `;` в заголовке — разделители полей RFC 5545.
+
+    Порядок экранирования важен: обратный слэш обязан идти первым, иначе слэш,
+    добавленный к запятой, экранируется следующим проходом.
+    """
+    await _entry(session, family, anya, title=r"Купить: молоко, хлеб; и 100% сок \ да")
+    entries = await repo.all_entries(session, family.id)
+
+    events = _events(
+        export.to_ics(entries, family.tz, "Семья", datetime(2026, 8, 29, 6, 0))
+    )
+    assert events[0]["SUMMARY"] == "Купить: молоко\\, хлеб\\; и 100% сок \\\\ да"
+
+
+@pytest.mark.asyncio
+async def test_ics_folds_long_lines(session, family, anya):
+    """75 октетов на строку — лимит RFC. Кириллица занимает по два байта."""
+    await _entry(session, family, anya, title="я" * 300)
+    entries = await repo.all_entries(session, family.id)
+
+    payload = export.to_ics(entries, family.tz, "Семья", datetime(2026, 8, 29, 6, 0))
+    for line in payload.decode("utf-8").split("\r\n"):
+        assert len(line.encode("utf-8")) <= 75, line[:40]
+
+
+@pytest.mark.asyncio
+async def test_ics_uids_are_stable_across_exports(session, family, anya):
+    """Иначе повторная выгрузка заводит дубли вместо обновления записей."""
+    await _entry(session, family, anya)
+    entries = await repo.all_entries(session, family.id)
+
+    first = _events(export.to_ics(entries, family.tz, "С", datetime(2026, 8, 29, 6, 0)))
+    second = _events(export.to_ics(entries, family.tz, "С", datetime(2026, 9, 1, 6, 0)))
+
+    assert first[0]["UID"] == second[0]["UID"]
+    assert first[0]["UID"].endswith(export.ICS_DOMAIN)
+
+
+@pytest.mark.asyncio
+async def test_export_sends_the_calendar_as_a_third_file(session, family, anya):
+    await _entry(session, family, anya)
+    message = FakeMessage()
+
+    await cmd_export(message, session, family)
+
+    names = [doc.filename for doc, _ in message.documents]
+    assert [n.rsplit(".", 1)[-1] for n in names] == ["md", "csv", "ics"]
+
+
+@pytest.mark.asyncio
+async def test_export_skips_an_empty_calendar(session, family, anya):
+    """Валидный, но пустой .ics говорит человеку только «что-то сломалось»."""
+    await _entry(session, family, anya, kind="note", title="Мысль", due_at=None)
+    message = FakeMessage()
+
+    await cmd_export(message, session, family)
+
+    names = [doc.filename for doc, _ in message.documents]
+    assert not any(n.endswith(".ics") for n in names)

@@ -46,6 +46,7 @@ COLUMNS = (
     "срок",
     "весь день",
     "автор",
+    "поручено",
     "создано",
     "закрыто",
     "кто закрыл",
@@ -93,6 +94,7 @@ def to_csv(entries: list[Entry], tz: str) -> bytes:
                 _moment(entry.due_at, tz, all_day=entry.all_day),
                 "да" if entry.all_day else "",
                 entry.author.display_name if entry.author else "",
+                entry.assignee.display_name if entry.assignee else "",
                 _moment(entry.created_at, tz),
                 _moment(entry.done_at, tz),
                 entry.closer.display_name if entry.closer else "",
@@ -127,6 +129,130 @@ def to_markdown(entries: list[Entry], tz: str, title: str, today: date) -> bytes
     return "\n".join(lines).encode("utf-8")
 
 
+# --- iCalendar -----------------------------------------------------------------
+#
+# Односторонняя выгрузка в календарь — то, что осталось от отменённой интеграции
+# с Google (28.08.2026). Отменена была именно интеграция: OAuth, `token.json`,
+# таблица `gcal_map` и живая синхронизация. Файл `.ics` ничего этого не требует
+# — его открывает любой календарь, включая гугловский, — и потому запрету не
+# противоречит. Синхронизации здесь нет и не будет: выгрузил и забыл.
+#
+# Пишем формат руками, без библиотеки. RFC 5545 велик, но нужная его часть —
+# десяток строк, а новая зависимость ради них тянется в `requirements.lock`
+# и в образ.
+
+# Домен для UID. Своего у бота нет, а UID обязан быть глобально уникальным,
+# иначе повторная выгрузка заведёт в календаре дубли вместо обновления записей
+ICS_DOMAIN = "family-planner.local"
+
+# RFC 5545 ограничивает строку 75 **октетами**, не символами, и требует
+# переносить продолжение с пробела. Считать длину в символах нельзя: кириллица
+# в UTF-8 занимает по два байта, и строка из 70 букв «я» — это 140 октетов.
+# Берём 73, чтобы у строки продолжения хватило места на ведущий пробел
+ICS_FOLD_AT = 73
+
+
+def _ics_escape(value: str) -> str:
+    """Экранирование по RFC 5545. Порядок важен: обратный слэш первым.
+
+    Иначе экранирующий слэш, добавленный к запятой, сам будет экранирован
+    следующим проходом — и в календаре появится `\\\\,` вместо `,`.
+    """
+    return (
+        value.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\n", "\\n")
+    )
+
+
+def _fold(line: str) -> list[str]:
+    """Длинную строку — на куски по `ICS_FOLD_AT` октетов, продолжения с пробела.
+
+    Границу считаем в октетах, а режем по символам: рвать UTF-8 посередине
+    нельзя — получится битый файл. Поэтому набираем посимвольно, пока
+    помещается, а не делим строку на равные куски: при кириллице «равные куски»
+    по символам дают вдвое больше октетов, чем разрешено.
+    """
+    if len(line.encode("utf-8")) <= ICS_FOLD_AT:
+        return [line]
+
+    folded: list[str] = []
+    chunk, size = "", 0
+    # У продолжений первый октет съедает ведущий пробел
+    for char in line:
+        width = len(char.encode("utf-8"))
+        limit = ICS_FOLD_AT - (1 if folded else 0)
+        if size + width > limit:
+            folded.append(chunk)
+            chunk, size = char, width
+        else:
+            chunk += char
+            size += width
+    folded.append(chunk)
+    return [folded[0], *(f" {part}" for part in folded[1:])]
+
+
+def to_ics(entries: list[Entry], tz: str, title: str, now: datetime) -> bytes:
+    """События и записи со сроком → календарь. Пусто — тоже валидный файл.
+
+    Берём **только записи с `due_at`**: у заметки без срока в календаре места
+    нет, а пустая дата сделала бы файл невалидным. Удалённые (`archived`) не
+    выгружаем вовсе — в отличие от CSV и Markdown: те задуманы как полный
+    слепок базы, а календарь — как рабочий инструмент, и воскрешать в нём
+    выброшенное незачем.
+
+    `all_day` едет как `VALUE=DATE` — так календари и рисуют его полосой на
+    весь день, а не встречей в полночь. Остальное переводится в UTC с суффиксом
+    `Z`: писать локальное время пришлось бы вместе с блоком `VTIMEZONE`,
+    а он в разы больше всего остального файла.
+    """
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        f"PRODID:-//{ICS_DOMAIN}//Family Planner//RU",
+        "CALSCALE:GREGORIAN",
+        f"X-WR-CALNAME:{_ics_escape(title)}",
+    ]
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+
+    for entry in entries:
+        if entry.due_at is None or entry.status == "archived":
+            continue
+        lines.append("BEGIN:VEVENT")
+        lines.append(f"UID:{entry.id}@{ICS_DOMAIN}")
+        lines.append(f"DTSTAMP:{stamp}")
+        if entry.all_day:
+            local_day = tu.to_local(entry.due_at, tz).date()
+            lines.append(f"DTSTART;VALUE=DATE:{local_day.strftime('%Y%m%d')}")
+        else:
+            lines.append(f"DTSTART:{entry.due_at.strftime('%Y%m%dT%H%M%SZ')}")
+        lines.append(f"SUMMARY:{_ics_escape(_flat(entry.title))}")
+
+        # ATTENDEE намеренно не используем: он требует адреса участника и
+        # превращает событие в приглашение, которое календарь попытается
+        # разослать. Поручение — просто строка описания
+        described = [_flat(entry.body)] if entry.body else []
+        if entry.assignee:
+            described.append(f"Поручено: {entry.assignee.display_name}")
+        if described:
+            lines.append(f"DESCRIPTION:{_ics_escape(' — '.join(described))}")
+        # Закрытую помечаем статусом, а не выбрасываем: план на прошедшую неделю
+        # без сделанного читается как «ничего и не было»
+        lines.append(
+            "STATUS:COMPLETED" if entry.status == "done" else "STATUS:CONFIRMED"
+        )
+        lines.append(f"CATEGORIES:{_ics_escape(KIND_TITLES.get(entry.kind, entry.kind))}")
+        lines.append("END:VEVENT")
+
+    lines.append("END:VCALENDAR")
+
+    # CRLF — требование RFC, и не формальное: часть календарей на голом \n
+    # молча показывает пустой файл
+    folded = [part for line in lines for part in _fold(line)]
+    return ("\r\n".join(folded) + "\r\n").encode("utf-8")
+
+
 def _md_line(entry: Entry, tz: str) -> str:
     box = STATUS_BOXES.get(entry.status, "[ ]")
     parts = [f"- {box}"]
@@ -138,5 +264,10 @@ def _md_line(entry: Entry, tz: str) -> str:
     if body:
         parts.append(f"— {body}")
     if entry.author:
-        parts.append(f"({entry.author.display_name})")
+        who = entry.author.display_name
+        if entry.assignee:
+            # Стрелкой, а не двумя скобками: «(Аня) (Миша)» не читается, а
+            # «(Аня → Миша)» сразу говорит, кто завёл и кому поручено
+            who += f" → {entry.assignee.display_name}"
+        parts.append(f"({who})")
     return " ".join(parts)

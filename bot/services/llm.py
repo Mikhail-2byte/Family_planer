@@ -11,7 +11,6 @@
 markdown-обёртка — не теоретический случай.
 """
 
-import asyncio
 import json
 import logging
 import re
@@ -19,17 +18,19 @@ import re
 import httpx
 
 from bot.config import settings
+from bot.services import http_retry
 
 log = logging.getLogger(__name__)
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
-TIMEOUT = 60.0
-ATTEMPTS = 3  # первая попытка плюс два ретрая
-BACKOFF = 2.0  # секунды перед вторым ретраем, дальше вдвое
 
-# Повторять есть смысл только на этих: 429 — занятый бесплатный пул,
-# 5xx — сбой на стороне провайдера. На 401/402/404 повтор даст то же самое
-RETRY_CODES = frozenset({408, 429, 500, 502, 503, 504})
+# Политика повторов общая с расшифровкой голоса — см. `http_retry`. Раньше цикл
+# и константы existed здесь и там построчно одинаковыми, и разошлись бы молча.
+# Имена оставлены модулю: на них смотрят тесты и читатель, пришедший сюда
+TIMEOUT = http_retry.TIMEOUT
+ATTEMPTS = http_retry.ATTEMPTS
+BACKOFF = http_retry.BACKOFF
+RETRY_CODES = http_retry.RETRY_CODES
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
@@ -70,13 +71,10 @@ async def complete(system: str, user: str, *, model: str | None = None) -> str |
     # Клиент на вызов, а не на модуль: запросов единицы в день, а живой
     # AsyncClient пришлось бы закрывать на остановке бота
     async with httpx.AsyncClient(proxy=settings.openrouter_proxy or None) as client:
-        for attempt in range(ATTEMPTS):
-            outcome = await _try_once(client, payload)
-            if outcome is not None:
-                return outcome or None  # пустая строка — тоже неудача
-            if attempt < ATTEMPTS - 1:
-                await asyncio.sleep(BACKOFF * 2**attempt)
-    return None
+        outcome = await http_retry.with_retries(
+            lambda: _try_once(client, payload), what="OpenRouter"
+        )
+    return outcome or None  # пустая строка — тоже неудача
 
 
 async def _try_once(client: httpx.AsyncClient, payload: dict) -> str | None:

@@ -4,7 +4,7 @@
 записать что-то в семью всё равно можно.
 """
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
@@ -24,7 +24,7 @@ from bot.db import repo
 from bot.db.models import Family, Member
 from bot.filters import IN_GROUP, IN_GROUP_CB
 from bot.handlers import lists
-from bot.services import panel
+from bot.services import panel, parsing
 from bot.services import timeutil as tu
 
 router = Router()
@@ -143,7 +143,13 @@ async def pick_kind(call: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(New.title, F.text)
 async def take_title(message: Message, state: FSMContext) -> None:
-    await state.update_data(title=message.text.strip())
+    # Потолок тот же, что на трёх остальных путях создания (`capture.edit_field`,
+    # `capture._fallback`, `entry.take_reply`), и он не про аккуратность.
+    # `Entry.title` объявлен `String(500)`, но SQLite длину VARCHAR не проверяет:
+    # вставленный сюда абзац сохранится целиком, а потом сломает `/today`,
+    # панель дня и утреннюю сводку разом — 4096 символов Telegram это отказ,
+    # а не обрезка
+    await state.update_data(title=message.text.strip()[: parsing.TITLE_LIMIT])
     await state.set_state(New.day)
     await message.answer(ASK_DAY, reply_markup=DAY_KB)
 
@@ -252,7 +258,7 @@ async def stale_tap(call: CallbackQuery) -> None:
     await call.answer(NOT_YOURS, show_alert=True)
 
 
-def _parse_day(raw: str, today):
+def _parse_day(raw: str, today: date) -> date | None:
     """'27.08' или '27.08.2026'. Без года берём ближайший будущий."""
     parts = raw.strip().replace("/", ".").split(".")
     try:

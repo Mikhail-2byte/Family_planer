@@ -1,0 +1,58 @@
+# Слепок окружения, на котором проект действительно работает и проходит
+# тесты. Снят 29.08.2026 с домашней машины.
+#
+# Зачем он нужен: `requirements.txt` задан диапазонами (`aiogram>=3.31,<4`),
+# и это правильно для разработки, но не для боевой пересборки. Образ на VPS
+# собирается когда придётся, и `pip` втянет тот минор, который вышел к тому
+# дню. Для бота, который семья держит вместо календаря, «собрался — и повёл
+# себя иначе» дороже, чем отставание на версию.
+#
+# Dockerfile ставит отсюда. Дома по-прежнему `requirements-dev.txt`:
+# разработке диапазоны нужны, иначе обновление никогда не случится.
+#
+# Обновлять так:
+#   .venv/Scripts/pip install -U -r requirements.txt
+#   .venv/Scripts/python -m pytest        # обязательно, до записи слепка
+#   .venv/Scripts/pip freeze > requirements.lock   # и убрать отсюда dev-пакеты
+
+aiofiles==25.1.0
+aiogram==3.31.0
+aiohappyeyeballs==2.7.1
+aiohttp_socks==0.12.0
+aiohttp==3.14.3
+aiosignal==1.4.0
+aiosqlite==0.22.1
+alembic==1.19.1
+annotated-types==0.8.0
+anyio==4.14.2
+attrs==26.1.0
+certifi==2026.7.22
+colorama==0.4.6
+dateparser==1.4.2
+frozenlist==1.8.0
+greenlet==3.5.5
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.19
+magic-filter==1.0.12
+Mako==1.4.1
+MarkupSafe==3.0.3
+multidict==6.7.1
+packaging==26.3
+propcache==0.5.2
+pydantic_core==2.46.5
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+python-socks==3.0.0
+pytz==2026.3.post1
+regex==2026.7.19
+six==1.17.0
+SQLAlchemy==2.0.52
+typing_extensions==4.16.0
+typing-inspection==0.4.4
+tzdata==2026.3
+tzlocal==5.4.4
+yarl==1.24.5

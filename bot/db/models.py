@@ -111,6 +111,13 @@ class Entry(Base):
     # иначе на каждую строку списка уходит отдельный запрос
     author: Mapped[Member] = relationship(lazy="selectin", foreign_keys=[author_id])
     closer: Mapped[Member | None] = relationship(lazy="selectin", foreign_keys=[done_by])
+    # Кому поручено. Колонка `assignee_id` лежала в схеме с самой первой
+    # ревизии и всё это время была мёртвой — связь к ней добавлена вместе с
+    # кнопкой «👤 Кому» в карточке записи. Миграции не требует: `relationship`
+    # схему не меняет, и `test_schema_matches_the_models` это подтверждает
+    assignee: Mapped[Member | None] = relationship(
+        lazy="selectin", foreign_keys=[assignee_id]
+    )
 
 
 class Reminder(Base):

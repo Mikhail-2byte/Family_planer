@@ -16,22 +16,22 @@
 через «+».
 """
 
-import asyncio
 import logging
 
 import httpx
 
 from bot.config import settings
+from bot.services import http_retry
 
 log = logging.getLogger(__name__)
 
-TIMEOUT = 60.0
-ATTEMPTS = 3  # первая попытка плюс два ретрая
-BACKOFF = 2.0  # секунды перед вторым ретраем, дальше вдвое
-
-# Те же коды, что у `llm.py`, и по той же причине: 429 — занятая квота,
-# 5xx — сбой на стороне провайдера. На 401/402/404 повтор даст то же самое
-RETRY_CODES = frozenset({408, 429, 500, 502, 503, 504})
+# Политика повторов общая с `llm.py` — см. `http_retry`. Здесь она особенно
+# важна: голосовое проходит через два таких вызова подряд (сначала расшифровка,
+# потом модель), и без потолка ожидание складывалось до шести минут
+TIMEOUT = http_retry.TIMEOUT
+ATTEMPTS = http_retry.ATTEMPTS
+BACKOFF = http_retry.BACKOFF
+RETRY_CODES = http_retry.RETRY_CODES
 
 
 async def transcribe(audio: bytes, filename: str = "voice.ogg") -> str | None:
@@ -45,13 +45,10 @@ async def transcribe(audio: bytes, filename: str = "voice.ogg") -> str | None:
     # Клиент на вызов, а не на модуль: голосовых единицы в день, зато не нужно
     # закрывать живое соединение на остановке бота (то же решение, что в llm.py)
     async with httpx.AsyncClient(proxy=settings.stt_proxy or None) as client:
-        for attempt in range(ATTEMPTS):
-            outcome = await _try_once(client, audio, filename)
-            if outcome is not None:
-                return outcome or None  # пустая строка — тоже неудача
-            if attempt < ATTEMPTS - 1:
-                await asyncio.sleep(BACKOFF * 2**attempt)
-    return None
+        outcome = await http_retry.with_retries(
+            lambda: _try_once(client, audio, filename), what="Расшифровка"
+        )
+    return outcome or None  # пустая строка — тоже неудача
 
 
 async def _try_once(

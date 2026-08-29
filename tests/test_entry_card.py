@@ -5,6 +5,7 @@
 """
 
 from datetime import date, datetime, time, timedelta
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -16,7 +17,6 @@ from bot.handlers import entry as handler
 from bot.handlers import views
 from bot.services import digest, export, review
 from bot.services import timeutil as tu
-from types import SimpleNamespace
 
 MSK = "Europe/Moscow"
 NOW = datetime(2026, 8, 27, 9, 0)  # 12:00 по Москве, четверг
@@ -656,3 +656,122 @@ async def test_page_survives_an_edit(session, family, anya, bot, monkeypatch):
         if b.text == kb.BTN_ENTRY_BACK
     ]
     assert back and back[0].offset == 2
+
+
+# --- Исполнитель --------------------------------------------------------------
+#
+# Колонка `entries.assignee_id` лежала в схеме с самой первой ревизии и всё это
+# время была мёртвой: `create_entry` её принимал, но не писал никто. Кнопка
+# «👤 Кому» её оживила. Ролей это не заводит — поручение остаётся подписью,
+# а не правом: закрыть и поправить запись по-прежнему может любой участник.
+
+
+@pytest_asyncio.fixture
+async def misha(session, family):
+    return await repo.get_or_create_member(session, family.id, 333, "Миша")
+
+
+@pytest.mark.asyncio
+async def test_who_screen_offers_every_member(session, family, anya, misha, bot, task):
+    call = await _tap("who", task.id, session, family, bot)
+
+    assert texts.entry_ask_who(task.title) in call.screen
+    assert "Аня" in call.labels and "Миша" in call.labels
+
+
+@pytest.mark.asyncio
+async def test_nobody_button_appears_only_when_there_is_something_to_clear(
+    session, family, anya, misha, bot, task
+):
+    """Кнопка, заведомо ничего не меняющая, обещает действие впустую."""
+    call = await _tap("who", task.id, session, family, bot)
+    assert kb.BTN_ENTRY_NOBODY not in call.labels
+
+    await _tap("setwho", task.id, session, family, bot, value=misha.id)
+    call = await _tap("who", task.id, session, family, bot)
+    assert kb.BTN_ENTRY_NOBODY in call.labels
+
+
+@pytest.mark.asyncio
+async def test_assigning_and_clearing(session, family, anya, misha, bot, task):
+    call = await _tap("setwho", task.id, session, family, bot, value=misha.id)
+    await session.refresh(task)
+    assert task.assignee_id == misha.id
+    assert call.alert == texts.entry_who_saved("Миша")
+    assert "Поручено: Миша" in call.screen
+
+    call = await _tap("setwho", task.id, session, family, bot, value=0)
+    await session.refresh(task)
+    assert task.assignee_id is None
+    assert call.alert == texts.ENTRY_WHO_CLEARED
+
+
+@pytest.mark.asyncio
+async def test_assignee_shows_in_the_list_line(session, family, anya, misha, task):
+    await repo.set_assignee(session, task.id, family.id, misha.id)
+    await session.refresh(task)
+
+    line = texts.entry_line(task, MSK, NOW)
+    assert "👤" in line and "Миша" in line
+    # Автор в строке тоже остаётся: это разные роли, и путать их нельзя
+    assert "Аня" in line
+
+
+@pytest.mark.asyncio
+async def test_closed_entry_does_not_carry_the_assignee_in_lists(
+    session, family, anya, misha, task
+):
+    """Дело сделано — десять лишних символов в каждой строке ни к чему."""
+    await repo.set_assignee(session, task.id, family.id, misha.id)
+    await repo.complete_entry(session, task.id, family.id, anya.id)
+    await session.refresh(task)
+
+    assert "👤" not in texts.entry_line(task, MSK, NOW)
+    # А в карточке — остаётся: там место есть, и это часть истории записи
+    assert "Поручено: Миша" in texts.entry_card(task, MSK, NOW)
+
+
+@pytest.mark.asyncio
+async def test_assignee_from_another_family_is_refused(session, family, anya, task):
+    """Изоляция по `family_id` — единственная защита в проекте, ролей и прав нет."""
+    alien = await repo.get_or_create_family(session, -1009, "Чужие")
+    stranger = await repo.get_or_create_member(session, alien.id, 999, "Чужой")
+
+    assert await repo.set_assignee(session, task.id, family.id, stranger.id) is None
+    await session.refresh(task)
+    assert task.assignee_id is None
+
+
+@pytest.mark.asyncio
+async def test_assigning_an_entry_of_another_family_is_refused(
+    session, family, anya, misha, task
+):
+    alien = await repo.get_or_create_family(session, -1009, "Чужие")
+
+    assert await repo.set_assignee(session, task.id, alien.id, misha.id) is None
+    await session.refresh(task)
+    assert task.assignee_id is None
+
+
+@pytest.mark.asyncio
+async def test_assignee_is_not_a_permission(session, family, anya, misha, task):
+    """Поручение — подпись, а не право: закрыть запись может любой участник."""
+    await repo.set_assignee(session, task.id, family.id, misha.id)
+
+    closed = await repo.complete_entry(session, task.id, family.id, anya.id)
+    assert closed is not None and closed.status == "done"
+
+
+@pytest.mark.asyncio
+async def test_who_screen_drops_a_pending_edit(session, family, anya, misha, bot, task):
+    """Экран сменился — ответ реплаем правкой уже не считается.
+
+    Та же грабля, что у 'date' и 'del': снятое ожидание — единственное, что
+    отличает «человек передумал» от «человек отвечает на вопрос бота».
+    """
+    call = FakeCall(family.chat_id)
+    await _tap("text", task.id, session, family, bot, call=call)
+    assert handler._pending
+
+    await _tap("who", task.id, session, family, bot, call=call)
+    assert not handler._pending

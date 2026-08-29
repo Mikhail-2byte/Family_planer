@@ -58,9 +58,24 @@ def _awaits(message: Message) -> bool:
 async def _live_entry(
     session: AsyncSession, entry_id: int, family: Family
 ) -> Entry | None:
-    """Запись, которую ещё можно разбирать. Изоляция по семье — обязательна."""
+    """Запись, которую ещё можно разбирать. Изоляция по семье — обязательна.
+
+    Срок проверяется наравне со статусом, и это не перестраховка. Разбор
+    показывает только просроченное (`overdue_entries` требует непустого
+    `due_at`), но кнопки живут в чате вечно, а с этапа 7 срок у записи можно
+    снять карточкой (`entry.py`, «без даты» → `entries.clear_due`). Между
+    выпуском кнопки «напомнить за 15 минут» и тапом по ней запись успевает
+    остаться без срока — и тогда `_remind` считал бы `None - timedelta`, а
+    `_moved_to` звал бы `fmt_due(None)`. Оба падают, а упавший хендлер стоит
+    апдейта: offset Telegram сдвигается независимо от исхода.
+    """
     entry = await repo.get_entry(session, entry_id)
-    if entry is None or entry.family_id != family.id or entry.status != "open":
+    if (
+        entry is None
+        or entry.family_id != family.id
+        or entry.status != "open"
+        or entry.due_at is None
+    ):
         return None
     return entry
 
@@ -167,7 +182,16 @@ async def _remind(
     minutes: int,
     now: datetime,
 ) -> str:
-    """Завести напоминание к перенесённой записи. Вернёт оговорку, если не вышло."""
+    """Завести напоминание к перенесённой записи. Вернёт оговорку, если не вышло.
+
+    Срок к этому моменту проверен `_live_entry`, но проверка повторена здесь:
+    сигнатура принимает `Entry`, у которого `due_at` необязателен, и держать
+    защиту на порядке вызовов там, где падение стоит апдейта, — ровно та
+    ошибка, что этот модуль уже допустил однажды.
+    """
+    if entry.due_at is None:
+        return texts.REVIEW_STALE
+
     anchor = entry.due_at
     if entry.all_day:
         # У записи «на весь день» срок — полночь, и отсчитывать «за 15 минут»

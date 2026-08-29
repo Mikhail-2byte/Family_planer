@@ -11,9 +11,9 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
+from bot import keyboards as kb
 from bot import texts
 from bot.db import repo
-from bot import keyboards as kb
 from bot.handlers import capture, lists
 from bot.services import parsing
 

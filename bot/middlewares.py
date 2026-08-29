@@ -11,9 +11,10 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from aiogram import BaseMiddleware
+from aiogram import BaseMiddleware, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Chat, Message, TelegramObject, Update, User
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
 from bot.db import repo
@@ -43,7 +44,7 @@ async def drop_wizard_state(
     """
     state: FSMContext | None = data.get("state")
     dropped = state is not None and await state.get_state() is not None
-    if dropped:
+    if dropped and state is not None:  # второе условие — для проверки типов
         await state.clear()
 
     result = await handler(event, data)
@@ -90,7 +91,18 @@ class FamilyMiddleware(BaseMiddleware):
             family = await repo.get_or_create_family(session, chat.id, chat.title)
             data["family"] = family
 
-            if user is not None and not user.is_bot:
+            # Отсекаем **себя**, а не «любого бота». Разница выяснилась на
+            # аргументах хендлеров: сообщение от анонимного админа приходит от
+            # `GroupAnonymousBot` (`is_bot=True`), сообщение из привязанного
+            # канала — от его бота. Проверка `not user.is_bot` ключа `member`
+            # тогда не клала, а его объявляют 20 сигнатур в handlers — aiogram
+            # падает на резолве аргумента с `TypeError: missing 1 required
+            # positional argument`, и апдейт теряется навсегда: offset Telegram
+            # сдвигается независимо от исхода. Участник «Group» в `/family`
+            # честнее проглоченного сообщения
+            bot: Bot | None = data.get("bot")
+            me = await bot.me() if bot is not None else None
+            if user is not None and (me is None or user.id != me.id):
                 data["member"] = await repo.get_or_create_member(
                     session, family.id, user.id, _display_name(user)
                 )
@@ -98,7 +110,9 @@ class FamilyMiddleware(BaseMiddleware):
             return await handler(event, data)
 
     @staticmethod
-    async def _handle_migration(session, message: Message | None, chat: Chat) -> bool:
+    async def _handle_migration(
+        session: AsyncSession, message: Message | None, chat: Chat
+    ) -> bool:
         """Возвращает True, если чат перестал существовать под текущим chat_id."""
         if message is None:
             return False

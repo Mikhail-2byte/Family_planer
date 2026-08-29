@@ -18,9 +18,11 @@
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 
 from dateparser.search import search_dates
+
+from bot.services.parsing import MAX_YEAR, MIN_YEAR
 
 _SETTINGS = {
     "PREFER_DATES_FROM": "future",
@@ -112,6 +114,34 @@ def parse_when(raw: str, now_local: datetime) -> Parsed | None:
     if not before.isspace() or not after.isspace():
         return None
 
+    # Границы года — та же защита, что у `parsing._dt` на пути модели, и по той
+    # же причине: за ними лежит не план семьи, а мусор, а перевод такой даты в
+    # UTC даёт `OverflowError`, то есть падение хендлера ещё до карточки.
+    # `dateparser` уезжает туда охотно — «1 сентября в 10» он разбирал в 2110 год
+    if not MIN_YEAR <= when.year <= MAX_YEAR:
+        return None
+
     rest = (text[:start] + " " + text[end:]).strip(" ,.;—-:")
     rest = re.sub(r"\s{2,}", " ", rest)
     return Parsed(when=when, text=rest, fragment=fragment)
+
+
+def as_due(when: datetime, now_local: datetime) -> tuple[datetime, bool]:
+    """Разобранное «когда» → `(due_at, all_day)`.
+
+    Время, которого никто не называл, `dateparser` берёт из «сейчас»: сказано
+    «завтра» в 14:37 — получите «завтра в 14:37». Показать придуманное время
+    хуже, чем показать один день: человек подтверждает карточку кнопкой и
+    унесёт выдумку в базу. Признак «время не названо» — совпадение часа и
+    минуты с текущими; цена — «через сутки» тоже станет записью на весь день,
+    но это куда более редкая фраза, чем «завтра».
+
+    Общая функция, а не копия в каждом хендлере: правило родилось в разборе
+    без модели, а правку даты ответом на карточку завели позже и про него
+    забыли — «завтра» там давало «завтра в 14:37, не на весь день».
+    """
+    invented = (when.hour, when.minute) == (now_local.hour, now_local.minute)
+    all_day = invented or when.time() == time(0, 0)
+    if not all_day:
+        return when, False
+    return when.replace(hour=0, minute=0, second=0, microsecond=0), True

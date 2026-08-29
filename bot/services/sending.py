@@ -9,10 +9,27 @@ import logging
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+from aiogram.types import (
+    ForceReply,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 
 from bot.db.models import Family
 
 log = logging.getLogger(__name__)
+
+# То же объединение, что принимает сам aiogram. Своё имя, потому что оно
+# повторяется в трёх сигнатурах этого модуля, а раньше стояло голое `=None`:
+# ошибку «передали текст вместо клавиатуры» никто бы не поймал
+Markup = (
+    InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | ForceReply | None
+)
+# У правки объединение уже: `edit_message_text` принимает только inline-кнопки —
+# обычную клавиатуру у отправленного сообщения Telegram менять не даёт. Разницу
+# нашёл mypy; до него обе сигнатуры стояли с голым `=None` и были неотличимы
+EditMarkup = InlineKeyboardMarkup | None
 
 OK = "ok"
 FORBIDDEN = "forbidden"  # бота выгнали — ретраить бессмысленно
@@ -27,7 +44,7 @@ async def send(
     text: str,
     *,
     silent: bool = False,
-    reply_markup=None,
+    reply_markup: Markup = None,
 ) -> tuple[str, int | None]:
     """Отправить сообщение в чат семьи. Исключений наружу не выпускает.
 
@@ -61,14 +78,20 @@ async def send(
         return RETRY, None
 
 
-async def deliver(bot: Bot, family: Family, text: str, *, reply_markup=None) -> str:
+async def deliver(
+    bot: Bot, family: Family, text: str, *, reply_markup: Markup = None
+) -> str:
     """То же, что `send`, но без `message_id` — тикеру и дайджесту он не нужен."""
     status, _ = await send(bot, family, text, reply_markup=reply_markup)
     return status
 
 
 async def edit(
-    bot: Bot, family: Family, message_id: int, text: str, reply_markup=None
+    bot: Bot,
+    family: Family,
+    message_id: int,
+    text: str,
+    reply_markup: EditMarkup = None,
 ) -> str:
     """Перерисовать сообщение в чате семьи. Исключений наружу не выпускает.
 

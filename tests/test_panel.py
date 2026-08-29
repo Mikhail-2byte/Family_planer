@@ -308,7 +308,9 @@ async def test_panel_survives_missing_pin_rights(session, family, bot):
     await _reload(session, family)
 
     assert len(bot.sent) == 1
-    assert family.panel_message_id is not None, "id записан — иначе следующая правка выпустит вторую панель"
+    assert family.panel_message_id is not None, (
+        "id записан — иначе следующая правка выпустит вторую панель"
+    )
 
 
 @pytest.mark.asyncio

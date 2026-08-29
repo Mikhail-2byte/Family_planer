@@ -416,3 +416,51 @@ async def test_card_of_another_family_refuses(
     call = await _tap("save", card, session, family, anya, bot)
     assert call.alert == texts.CAPTURE_ALIEN
     assert await _entries(session, family) == []
+
+
+# --- Суточный лимит модели ------------------------------------------------------
+#
+# У бесплатного тира OpenRouter лимит на аккаунт, а не на ключ, и из-за него же
+# отменён режим `all`. Учёта не было: упёршись в лимит, бот получал 429, молча
+# уходил на `dateparser`, и человек видел «разобрал без ИИ», думая, что
+# сломалась сеть. Теперь останавливаемся своим счётчиком и говорим об этом.
+
+
+@pytest.mark.asyncio
+async def test_quota_stops_the_call_and_says_so(carded, monkeypatch, session, family, anya, bot):
+    from bot.services import parse_log
+
+    monkeypatch.setattr(capture.settings, "llm_daily_limit", 2)
+    monkeypatch.setattr(parse_log, "_counted_day", parse_log._today())
+    monkeypatch.setattr(parse_log, "_counted", 2)
+
+    calls = 0
+
+    async def never(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return None
+
+    monkeypatch.setattr(llm, "ask", never)
+
+    message, _ = await carded(_reply(_item()))
+
+    assert calls == 0, "заведомый отказ не стоит трёх попыток с паузами"
+    assert texts.CAPTURE_QUOTA_SPENT in message.texts
+    # И разбор всё равно состоялся — запасным путём, а не молчанием
+    assert len(message.texts) > 1
+
+
+@pytest.mark.asyncio
+async def test_zero_limit_means_no_limit(carded, monkeypatch):
+    """Платный ключ суточного потолка не имеет — проверка обязана выключаться."""
+    from bot.services import parse_log
+
+    monkeypatch.setattr(capture.settings, "llm_daily_limit", 0)
+    monkeypatch.setattr(parse_log, "_counted_day", parse_log._today())
+    monkeypatch.setattr(parse_log, "_counted", 10_000)
+
+    message, card = await carded(_reply(_item()))
+
+    assert card is not None
+    assert texts.CAPTURE_QUOTA_SPENT not in message.texts

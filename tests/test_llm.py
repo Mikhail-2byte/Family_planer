@@ -9,15 +9,21 @@ import json
 import httpx
 import pytest
 
-from bot.services import llm
+from bot.services import http_retry, llm
 
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
+    """Паузы между ретраями живут в `http_retry` — там их и гасим.
+
+    Раньше подменялся `asyncio.sleep` в самом модуле клиента; с выносом общей
+    политики повторов спать стало некому, и тест падал на отсутствии атрибута.
+    """
+
     async def instant(_seconds):
         return None
 
-    monkeypatch.setattr(llm.asyncio, "sleep", instant)
+    monkeypatch.setattr(http_retry.asyncio, "sleep", instant)
 
 
 @pytest.fixture(autouse=True)
@@ -114,7 +120,10 @@ async def test_provider_error_inside_200_is_retried(patched):
     """Отказ провайдера приезжает и с кодом 200 — с полем error в теле."""
     calls = []
     patched(
-        [httpx.Response(200, json={"error": {"message": "rate-limited upstream"}}), _ok('{"ok": 1}')],
+        [
+            httpx.Response(200, json={"error": {"message": "rate-limited upstream"}}),
+            _ok('{"ok": 1}'),
+        ],
         calls,
     )
     assert await llm.ask("system", "текст") == {"ok": 1}
@@ -127,7 +136,14 @@ async def test_empty_content_is_retried(patched):
     calls = []
     patched(
         [
-            httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "error"}]}),
+            httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": ""}, "finish_reason": "error"}
+                    ]
+                },
+            ),
             _ok('{"ok": 1}'),
         ],
         calls,

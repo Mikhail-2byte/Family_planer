@@ -27,6 +27,28 @@ from bot.services import timeutil as tu
 
 log = logging.getLogger(__name__)
 
+# Признак живого цикла для healthcheck в Docker. Отдельный файл, а не `bot.log`:
+# в спокойный тик бот не пишет в лог ни строки — ни напоминаний, ни дайджеста,
+# ни правки панели, — и свежесть лога о жизни цикла ничего не говорит.
+#
+# Нужен он затем, что `restart: unless-stopped` поднимает только упавший
+# процесс. Long polling, вставший при живом PID 1, для Docker выглядит здоровым:
+# контейнер работает, бот молчит, и заметит это семья, а не оркестратор.
+HEARTBEAT = settings.db_path.parent / "heartbeat"
+
+
+def _beat() -> None:
+    """Отметить, что цикл прошёл круг. Ошибки глотаем целиком.
+
+    Тикер не должен умирать из-за полного диска: пропущенные напоминания хуже
+    неточного healthcheck. Тот же довод, что у `parse_log.write`.
+    """
+    try:
+        HEARTBEAT.write_text(str(tu.now_utc()), encoding="utf-8")
+    except Exception:
+        log.warning("Не удалось обновить heartbeat", exc_info=True)
+
+
 # Насколько напоминание опоздало
 SILENT = "silent"  # почти вовремя — отправляем как есть
 LATE = "late"  # заметно позже — с пометкой, на какое время было запланировано
@@ -98,6 +120,10 @@ async def run(bot: Bot) -> None:
             raise
         except Exception:
             log.exception("Сбой в тике — цикл продолжается")
+        # После перехвата, а не внутри `try`: сбой одного тика — это ещё живой
+        # цикл, и гасить healthcheck на нём значит перезапускать бота из-за
+        # одной неудачной отправки
+        _beat()
         await asyncio.sleep(settings.tick_seconds)
 
 

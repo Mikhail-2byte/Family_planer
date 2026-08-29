@@ -322,6 +322,35 @@ async def edit_entry_title(
     return entry
 
 
+async def set_assignee(
+    session: AsyncSession, entry_id: int, family_id: int, assignee_id: int | None
+) -> Entry | None:
+    """Поручить запись участнику или снять поручение (`assignee_id=None`).
+
+    Контракт — как у соседей: `None` на чужой семье, отсутствующей и закрытой
+    записи. Но проверок здесь **две**, и вторая обязательна: участник тоже
+    проверяется на принадлежность семье. Изоляция по `family_id` — единственная
+    защита в проекте (ролей и прав нет), и без этой проверки id из колбэка
+    чужого чата поручил бы нашу задачу постороннему.
+
+    Ролей это не заводит: поручение — подпись в карточке, а не право. Закрыть
+    или поправить запись по-прежнему может любой участник чата.
+    """
+    entry = await session.get(Entry, entry_id)
+    if entry is None or entry.family_id != family_id or entry.status != "open":
+        return None
+
+    if assignee_id is not None:
+        member = await session.get(Member, assignee_id)
+        if member is None or member.family_id != family_id:
+            return None
+
+    entry.assignee_id = assignee_id
+    await session.commit()
+    await session.refresh(entry)
+    return entry
+
+
 async def archive_entry(
     session: AsyncSession, entry_id: int, family_id: int
 ) -> Entry | None:

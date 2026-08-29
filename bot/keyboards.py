@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import (
     InlineKeyboardButton,
@@ -5,6 +7,8 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
 )
+
+from bot.db.models import Entry, Member
 
 BTN_TODAY = "📅 Сегодня"
 BTN_BUY = "🛒 Покупки"
@@ -57,7 +61,7 @@ class EntryCB(CallbackData, prefix="ent"):
     """
 
     # 'open' | 'text' | 'date' | 'day' | 'other' | 'nodate' | 'del' | 'yes'
-    # | 'undo' | 'back'
+    # | 'undo' | 'back' | 'who' | 'setwho'
     action: str
     entry_id: int
     # Страница, с которой пришли: вид и смещение. Класс новый, поля можно
@@ -66,9 +70,11 @@ class EntryCB(CallbackData, prefix="ent"):
     # человека на ту же страницу, а не молча подсунуть чужую
     view: str = "tasks"
     offset: int = 0
-    # Только у 'day': сдвиг в днях от сегодня. Отдельным полем, а не поверх
+    # Смысл зависит от действия: у 'day' — сдвиг в днях от сегодня, у 'setwho'
+    # — id участника (0 = снять поручение). Отдельным полем, а не поверх
     # `offset` — иначе после переноса страница возврата теряется и «← Назад»
-    # уводит на первую
+    # уводит на первую. Новое поле ради 'setwho' заводить нельзя: кнопки
+    # карточки уже разошлись по чату, лишнее поле сделало бы их неразбираемыми
     value: int = 0
 
 
@@ -176,7 +182,7 @@ def capture_kind_keyboard() -> InlineKeyboardMarkup:
 
 
 def entry_list_keyboard(
-    entries, view: str, offset: int, total: int, page_size: int
+    entries: Sequence[Entry], view: str, offset: int, total: int, page_size: int
 ) -> InlineKeyboardMarkup | None:
     """По ряду на запись — закрыть и открыть карточку — плюс навигация.
 
@@ -272,7 +278,7 @@ BTN_REVIEW_OTHER_DAY = "🗓 Другая дата"
 BTN_REVIEW_BACK = "← Назад"
 
 
-def review_keyboard(entries) -> InlineKeyboardMarkup | None:
+def review_keyboard(entries: Sequence[Entry]) -> InlineKeyboardMarkup | None:
     """По ряду на запись: закрыть или перенести.
 
     Кнопок ровно столько, сколько пронумерованных строк в тексте, — иначе
@@ -350,6 +356,8 @@ def review_remind_keyboard(entry_id: int, *, all_day: bool) -> InlineKeyboardMar
 
 BTN_ENTRY_TEXT = "✏️ Текст"
 BTN_ENTRY_DATE = "📅 Дата"
+BTN_ENTRY_WHO = "👤 Кому"
+BTN_ENTRY_NOBODY = "🚫 Ничьё"
 BTN_ENTRY_DELETE = "🗑 Удалить"
 BTN_ENTRY_DELETE_YES = "🗑 Да, удалить"
 BTN_ENTRY_NO_DATE = "🚫 Убрать дату"
@@ -388,6 +396,15 @@ def entry_card_keyboard(entry_id: int, view: str, offset: int) -> InlineKeyboard
             ],
             [
                 InlineKeyboardButton(
+                    text=BTN_ENTRY_WHO,
+                    callback_data=EntryCB(
+                        action="who",
+                        entry_id=entry_id,
+                        view=view,
+                        offset=offset,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
                     text=BTN_ENTRY_DELETE,
                     callback_data=EntryCB(
                         action="del",
@@ -395,7 +412,7 @@ def entry_card_keyboard(entry_id: int, view: str, offset: int) -> InlineKeyboard
                         view=view,
                         offset=offset,
                     ).pack(),
-                )
+                ),
             ],
             [
                 InlineKeyboardButton(
@@ -410,6 +427,74 @@ def entry_card_keyboard(entry_id: int, view: str, offset: int) -> InlineKeyboard
             ],
         ]
     )
+
+
+def entry_assignee_keyboard(
+    entry_id: int,
+    view: str,
+    offset: int,
+    members: Sequence[Member],
+    *,
+    assigned: bool,
+) -> InlineKeyboardMarkup:
+    """Кому поручить: по ряду на участника плюс «ничьё».
+
+    `member.id` едет в готовом поле `value` — заводить новое ради него нельзя:
+    кнопки карточки уже разошлись по чату, и лишнее поле сделало бы их
+    неразбираемыми. Пересечения со сдвигом дней у `'day'` нет: у каждого
+    действия своё, а одно и то же поле в разных действиях значит разное —
+    ровно как `value` у `ReviewCB`.
+
+    «Ничьё» показывается только когда есть что снимать: кнопка, заведомо
+    ничего не меняющая, обещает действие впустую. Тот же довод, что у
+    «Убрать дату».
+    """
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=member.display_name,
+                callback_data=EntryCB(
+                    action="setwho",
+                    entry_id=entry_id,
+                    view=view,
+                    offset=offset,
+                    value=member.id,
+                ).pack(),
+            )
+        ]
+        for member in members
+    ]
+    if assigned:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=BTN_ENTRY_NOBODY,
+                    # 0 вместо None: поле у `CallbackData` целочисленное, а
+                    # существующего участника с таким id не бывает
+                    callback_data=EntryCB(
+                        action="setwho",
+                        entry_id=entry_id,
+                        view=view,
+                        offset=offset,
+                        value=0,
+                    ).pack(),
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=BTN_ENTRY_BACK,
+                callback_data=EntryCB(
+                    action="open",
+                    entry_id=entry_id,
+                    view=view,
+                    offset=offset,
+                ).pack(),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def entry_date_keyboard(
