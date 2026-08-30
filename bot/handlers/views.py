@@ -24,20 +24,35 @@ router.callback_query.filter(IN_GROUP_CB)
 PAGE_SIZE = 8
 
 
+# Отказы Telegram, при которых перерисовывать уже нечего и незачем.
+# «not modified» — двое тапнули одну кнопку на одном сообщении.
+# Остальные два появились с этапа 11: утренняя уборка стирает чат, и тап по
+# кнопке в сообщении, которое исчезает в эту же секунду, — теперь **норма**,
+# а не неожиданность. Раньше такой тап уронил бы хендлер, а упавший апдейт
+# теряется навсегда: offset Telegram сдвигается независимо от исхода
+_HARMLESS_EDITS = (
+    "message is not modified",
+    "message to edit not found",
+    "message can't be edited",
+)
+
+
 async def edit_or_ignore(
     call: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None
 ) -> None:
-    """Перерисовать сообщение, стерпев «message is not modified».
+    """Перерисовать сообщение, стерпев отказы, на которые ответить нечем.
 
-    Двое могут тапнуть одну и ту же кнопку на одном сообщении: второй `edit_text`
-    получает от Telegram отказ, и без подавления исключение уходит из хендлера —
-    у нажавшего до таймаута крутится «часик». Сравнивать надо `exc.message`:
-    в тексте исключения есть и метод, и описание.
+    Само действие к этому моменту уже сделано: и `mark_done`, и разбор
+    незакрытого правят базу до перерисовки. Поэтому потерянная картинка — это
+    потерянная картинка, а не потерянное действие.
+
+    Сравнивать надо `exc.message`: в тексте исключения есть и метод, и описание.
+    Те же строки разбирает `sending.edit` — фоновый двойник этой функции.
     """
     try:
         await call.message.edit_text(text, reply_markup=markup)
     except TelegramBadRequest as exc:
-        if "message is not modified" not in exc.message:
+        if not any(m in exc.message for m in _HARMLESS_EDITS):
             raise
 
 

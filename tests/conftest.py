@@ -98,7 +98,13 @@ class FakeBot:
     """
 
     def __init__(
-        self, fail_on=None, fail_on_edit=None, fail_on_pin=None, download_error=None
+        self,
+        fail_on=None,
+        fail_on_edit=None,
+        fail_on_pin=None,
+        download_error=None,
+        fail_on_delete=None,
+        fail_on_delete_one=None,
     ):
         self.sent: list[tuple[int, str]] = []
         self.kwargs: list[dict] = []  # чем сопровождалась отправка (reply_markup)
@@ -109,6 +115,14 @@ class FakeBot:
         self._fail_on = fail_on or {}
         self._fail_on_edit = fail_on_edit or {}
         self._fail_on_pin = fail_on_pin or {}
+        # Уборка чата (этап 11). Методы обязаны существовать даже там, где
+        # уборка не проверяется: `sending.delete_batch` глотает любое
+        # исключение, и `AttributeError` от фейка превратился бы в тихий RETRY —
+        # тест был бы зелёным и бессмысленным
+        self.deleted: list[list[int]] = []  # пачки, ушедшие в delete_messages
+        self.deleted_one: list[int] = []  # одиночные удаления
+        self._fail_on_delete = fail_on_delete or {}
+        self._fail_on_delete_one = fail_on_delete_one or {}
         # Скачивание голосового (этап 5): что отдать и чем упасть
         self.downloaded: list[object] = []
         self.voice_bytes = b"OggS\x00fake"
@@ -146,6 +160,20 @@ class FakeBot:
         self.unpinned.append(message_id)
         return None
 
+    async def delete_messages(self, chat_id: int, message_ids: list[int], **kwargs):
+        error = self._fail_on_delete.get(len(self.deleted))
+        self.deleted.append(list(message_ids))
+        if error is not None:
+            raise error
+        return True
+
+    async def delete_message(self, chat_id: int, message_id: int, **kwargs):
+        error = self._fail_on_delete_one.get(len(self.deleted_one))
+        self.deleted_one.append(message_id)
+        if error is not None:
+            raise error
+        return True
+
     async def download(self, file, destination=None, **kwargs):
         self.downloaded.append(file)
         if self._download_error is not None:
@@ -157,6 +185,11 @@ class FakeBot:
     @property
     def texts(self) -> list[str]:
         return [text for _, text in self.sent]
+
+    @property
+    def wiped(self) -> list[int]:
+        """Все id, которые бот пытался удалить, — пачками и поштучно."""
+        return [i for chunk in self.deleted for i in chunk] + self.deleted_one
 
 
 @pytest.fixture

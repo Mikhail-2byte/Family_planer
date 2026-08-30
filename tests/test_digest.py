@@ -121,14 +121,29 @@ async def test_digest_goes_out_once_a_day(session, family, anya, bot):
 
 
 @pytest.mark.asyncio
-async def test_empty_day_is_not_sent_but_still_marked(session, family, bot):
-    """Иначе каждый тик до полуночи пересобирает сводку, которую не отправит."""
+async def test_empty_day_still_gets_a_digest_but_without_a_ping(
+    session, family, bot
+):
+    """С этапа 11 пустой день не молчит — но и не будит.
+
+    До уборки чата молчание было верным: чат жил своей жизнью, и «на сегодня
+    ничего не запланировано» каждое утро было бы шумом. Теперь уборка стирает
+    всё выше сводки, и молчание оставило бы человека с пустым чатом без
+    единого объяснения, куда всё делось.
+
+    Звук при этом снят: `has_content` сменил работу с «слать или не слать» на
+    «будить или не будить». Отметка дня — как и была, иначе каждый тик до
+    полуночи пересобирает сводку заново.
+    """
     family.digest_time = "08:00"
     await session.commit()
 
     now = _msk(2026, 8, 27, 8, 0)
     await digest.send_pending(bot, session, now)
-    assert bot.sent == []
+
+    assert len(bot.sent) == 1
+    assert texts.EMPTY_TODAY in bot.texts[0]
+    assert bot.kwargs[0]["disable_notification"] is True
     await session.refresh(family)
     assert family.last_digest_on == date(2026, 8, 27)
 

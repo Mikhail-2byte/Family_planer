@@ -22,7 +22,7 @@ from bot import texts
 from bot.config import settings
 from bot.db import repo
 from bot.db.models import Entry, Family
-from bot.services import review, sending
+from bot.services import review, sending, sweep
 from bot.services import timeutil as tu
 
 log = logging.getLogger(__name__)
@@ -212,19 +212,39 @@ async def _send_one(
     today = tu.local_today(family.tz, now)
     text, has_content = await build_day(session, family, now)
 
-    if has_content:
-        blocks = [texts.DIGEST_HEADER]
-        if _is_late(family, today, now):
-            blocks.append(texts.DIGEST_LATE_NOTE)
-        blocks.append(text)
-        if await sending.deliver(bot, family, "\n\n".join(blocks)) == sending.RETRY:
-            return  # сеть или флуд — попробуем на следующем тике
-        if await _send_review(bot, session, family, now) == sending.RETRY:
-            return  # день не помечаем: на следующем тике уйдут оба сообщения
+    blocks = [texts.DIGEST_HEADER]
+    if _is_late(family, today, now):
+        blocks.append(texts.DIGEST_LATE_NOTE)
+    blocks.append(text)
 
-    # Отметка ставится и на пустом дне: иначе каждый тик до полуночи будет
-    # заново собирать сводку, которую всё равно не отправит
+    # Сводка уходит каждое утро, в том числе на пустом дне (этап 11). До него
+    # пустой день молчал — и это было верно, пока чат жил своей жизнью. Теперь
+    # уборка стирает всё выше сводки, и молчание оставило бы человека с пустым
+    # чатом без единого объяснения, куда всё делось.
+    #
+    # `has_content` при этом не осиротел, а сменил работу: пустое утро приходит
+    # без звука. Будить человека ради «на сегодня ничего не запланировано»
+    # незачем, а показать — стоит
+    status, anchor = await sending.send(
+        bot, family, "\n\n".join(blocks), silent=not has_content
+    )
+    if status == sending.RETRY:
+        return  # сеть или флуд — попробуем на следующем тике
+    if await _send_review(bot, session, family, now) == sending.RETRY:
+        return  # день не помечаем: на следующем тике уйдут оба сообщения
+
     await repo.set_last_digest_on(session, family, today)
+
+    # Уборка — последней, и порядок здесь не вкусовщина. Встань она до отметки
+    # дня и упади, `send_pending` проглотит исключение, день не пометится, и на
+    # следующем тике сводка уйдёт снова — и так каждую минуту до полуночи.
+    # Та же болезнь, которую в проекте уже лечили дважды (`backup._failed_on`,
+    # `panel` на BROKEN). При этом порядке худший исход — грязный чат на сутки.
+    #
+    # Якоря может не быть при BROKEN и FORBIDDEN: чистить чат, не показав
+    # сводку, значит стереть день молча
+    if status == sending.OK and anchor is not None:
+        await sweep.run(bot, session, family, anchor)
 
 
 async def _send_review(

@@ -587,6 +587,20 @@ async def set_last_digest_on(
     await session.commit()
 
 
+async def set_swept_upto(
+    session: AsyncSession, family: Family, message_id: int
+) -> None:
+    """Докуда чат вычищен утренней уборкой (этап 11).
+
+    Двигается по **фактически пройденным** пачкам, а не по задуманному
+    диапазону: часть сообщений Telegram удалять отказывается (служебное о
+    создании супергруппы, слишком старое), и знак обязан их перешагнуть —
+    иначе бот будет долбиться в неудаляемое каждое утро до конца времён.
+    """
+    family.swept_upto = message_id
+    await session.commit()
+
+
 async def set_family_settings(
     session: AsyncSession,
     family: Family,
@@ -672,6 +686,11 @@ async def migrate_family_chat_id(
     # Панель жила в старом чате, и её message_id в новом уже не наш
     family.panel_message_id = None
     family.panel_day = None
+    # Водяной знак уборки (этап 11) — из того же теста: id принадлежат старому
+    # чату. Цена пропуска здесь тихая и потому злая: у новой супергруппы id
+    # начинаются почти с нуля, старый знак висит на пяти тысячах, диапазон
+    # пуст всегда — уборка молча умирает навсегда, и никто не заметит
+    family.swept_upto = None
     # То же и с панелями списков покупок (этап 4): править сообщение по мёртвому
     # id значит на каждый тап получать «message to edit not found»
     await session.execute(
