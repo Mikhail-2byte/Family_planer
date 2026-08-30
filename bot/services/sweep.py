@@ -98,7 +98,7 @@ async def _run(
     if not batches:
         return
 
-    singles = 0
+    budget = MAX_SINGLE
     done_upto: int | None = None
 
     for chunk in batches:
@@ -111,32 +111,61 @@ async def _run(
         if status == sending.RETRY:
             # Сеть или флуд: остаток достаётся завтрашнему диапазону
             break
-        if status == sending.BROKEN:
-            # В пачке есть неудаляемое. Какое именно — Telegram не говорит,
-            # поэтому проходим её поштучно: остальные удалить всё равно надо
-            stopped = False
-            for message_id in chunk:
-                if singles >= MAX_SINGLE:
-                    break
-                singles += 1
-                one = await sending.delete_one(bot, family, message_id)
-                if one in (sending.FORBIDDEN, sending.RETRY):
-                    stopped = True
-                    break
-                await asyncio.sleep(SINGLE_PAUSE)
-            if stopped:
-                break
 
-        # Пачка пройдена: удалась целиком или разобрана поштучно. В обоих
-        # случаях возвращаться к ней завтра незачем — неудаляемое так и
-        # останется неудаляемым, а знак обязан его перешагнуть
-        done_upto = chunk[-1]
+        if status == sending.OK:
+            # Пачка ушла целиком — двигаем знак за её хвост
+            done_upto = chunk[-1]
+            continue
+
+        # BROKEN: в пачке есть неудаляемое. Какое именно, Telegram не говорит,
+        # поэтому проходим её поштучно — остальные удалить всё равно надо
+        reached, budget, halted = await _one_by_one(bot, family, chunk, budget)
+        if reached is not None:
+            done_upto = reached
+        if halted:
+            break
 
     if done_upto is None:
         return
 
     await repo.set_swept_upto(session, family, done_upto)
     await _forget_panel(session, family, done_upto)
+
+
+async def _one_by_one(
+    bot: Bot, family: Family, chunk: list[int], budget: int
+) -> tuple[int | None, int, bool]:
+    """Разобрать упавшую пачку поштучно. Отдаёт `(докуда дошли, остаток, стоп)`.
+
+    Отдаёт именно **последний тронутый id**, а не хвост пачки, и это главное
+    здесь. Знак двигается только за тем, что реально пытались удалить: иначе
+    исчерпанный бюджет объявлял бы вычищенными сотни сообщений, которых никто
+    не трогал, — и они остались бы в чате навсегда, потому что завтрашний
+    диапазон начался бы уже за ними. На боевом чате из 235 сообщений это было
+    135 штук.
+
+    Бюджет общий на всё утро: тысяча неудаляемых не должна дать тысячу запросов
+    подряд. Кончился — останавливаем уборку целиком, остаток достаётся
+    завтрашнему диапазону.
+
+    `BROKEN` на отдельном сообщении — не беда, а ожидаемый исход: это и есть то
+    самое неудаляемое, ради которого затевался откат. Идём дальше по пачке.
+    """
+    done: int | None = None
+    for message_id in chunk:
+        if budget <= 0:
+            log.info(
+                "Уборка чата %s: бюджет поштучных исчерпан, остаток — завтра",
+                family.chat_id,
+            )
+            return done, budget, True
+        budget -= 1
+        status = await sending.delete_one(bot, family, message_id)
+        if status in (sending.FORBIDDEN, sending.RETRY):
+            return done, budget, True
+        done = message_id
+        await asyncio.sleep(SINGLE_PAUSE)
+    return done, budget, False
 
 
 async def _forget_panel(

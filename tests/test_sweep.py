@@ -219,6 +219,57 @@ async def test_broken_batch_falls_back_one_by_one(session, family, morning):
 
 
 @pytest.mark.asyncio
+async def test_undeletable_message_is_not_mistaken_for_missing_rights(
+    session, family, morning
+):
+    """Найдено симуляцией первого боевого утра, до живого прогона.
+
+    «message can't be deleted» означает «вот это конкретное сообщение
+    неудаляемо» — служебное о создании супергруппы, слишком старое, — а не
+    «прав нет». Приняв его за отказ в правах, уборка останавливалась бы на
+    первой же пачке, куда попало служебное сообщение: то есть на первом же утре
+    и потом каждое утро. Знак не двигался бы никогда, и вся затея молча не
+    делала бы ничего — без единой ошибки в логе.
+    """
+    now = await morning(swept_upto=90)
+    service = FakeBot(fail_on_delete={0: _bad("message can't be deleted")})
+
+    await digest.send_pending(service, session, now)
+
+    assert service.deleted_one == list(range(91, 101)), "откат обязан состояться"
+    await session.refresh(family)
+    assert family.swept_upto == 100, "и знак обязан сдвинуться"
+
+
+@pytest.mark.asyncio
+async def test_spent_budget_does_not_claim_untouched_messages(
+    session, family, morning, monkeypatch
+):
+    """Вторая находка той же симуляции, и она тише первой.
+
+    Бюджет поштучных общий на утро. Когда он кончался посреди диапазона,
+    оставшиеся пачки всё равно объявлялись пройденными — а знак, шагнув за них,
+    закрывал им дорогу навсегда: завтрашний диапазон начинается уже выше. На
+    чате из 235 сообщений так терялось 135 штук, и заметить это было бы нечем.
+
+    Знак обязан двигаться только за тем, что реально пытались удалить.
+    """
+    monkeypatch.setattr(sweep, "MAX_SINGLE", 5)
+    monkeypatch.setattr(sweep, "SINGLE_PAUSE", 0)
+    now = await morning(swept_upto=80)
+    # Обе пачки падают: неудаляемое раскидано по разным местам диапазона
+    stubborn = FakeBot(
+        fail_on_delete={i: _bad("message can't be deleted") for i in range(5)}
+    )
+
+    await digest.send_pending(stubborn, session, now)
+
+    await session.refresh(family)
+    assert stubborn.deleted_one == [81, 82, 83, 84, 85]
+    assert family.swept_upto == 85, "знак — по последнему тронутому, а не по хвосту"
+
+
+@pytest.mark.asyncio
 async def test_missing_rights_do_not_trigger_one_by_one(session, family, morning):
     """Без разделения ошибок это был бы 101 неудачный запрос вместо одного.
 
