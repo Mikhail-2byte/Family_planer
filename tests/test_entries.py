@@ -419,23 +419,31 @@ async def test_notes_page_offers_a_close_button(session, family, anya):
     )
 
     _, markup = await _render_page(session, family, "notes", 0)
-    assert [b.text for b in markup.inline_keyboard[0]] == ["✅ 1", "✏️ 1"]
+    # Подпись своя: заметку не «выполняют», её убирают с глаз (этап 10).
+    # Колбэк при этом прежний `DoneCB` — механизм у обеих один
+    assert [b.text for b in markup.inline_keyboard[0]] == ["🗄 1", "✏️ 1"]
 
 
 @pytest.mark.asyncio
-async def test_closed_note_leaves_the_list_and_the_overdue_block(
+async def test_closed_entry_leaves_the_list_and_the_overdue_block(
     session, family, anya, bot
 ):
-    """Заметка с прошедшим сроком висела в «Просрочено» каждое утро вечно."""
+    """Закрытая запись с прошедшим сроком висела в «Просрочено» каждое утро вечно.
+
+    Баг был про механизм закрытия, а не про заметки, поэтому проверяется он на
+    задаче. Заметку сюда больше не подставить: с этапа 10 она в «Просрочено» не
+    попадает вовсе — это отдельная история, и стережёт её
+    `test_regressions_live.test_note_with_a_past_due_is_never_overdue`.
+    """
     from bot import keyboards as kb
     from bot.handlers.views import _render_page, mark_done
     from bot.services import digest
 
-    note = await repo.create_entry(
+    task = await repo.create_entry(
         session,
         family_id=family.id,
         author_id=anya.id,
-        kind="note",
+        kind="task",
         title="Полить цветы",
         due_at=_msk(2026, 8, 27, 7),
     )
@@ -445,14 +453,14 @@ async def test_closed_note_leaves_the_list_and_the_overdue_block(
 
     call = _DoneCall(family.chat_id)
     await mark_done(
-        call, kb.DoneCB(entry_id=note.id, offset=0), session, family, anya, bot
+        call, kb.DoneCB(entry_id=task.id, offset=0), session, family, anya, bot
     )
 
-    assert (await repo.get_entry(session, note.id)).status == "done"
+    assert (await repo.get_entry(session, task.id)).status == "done"
     body, _ = await digest.build_day(session, family, now)
     assert "Полить цветы" not in body
-    text, markup = await _render_page(session, family, "notes", 0)
-    assert text == texts.EMPTY_NOTES and markup is None
+    text, markup = await _render_page(session, family, "tasks", 0)
+    assert text == texts.EMPTY_TASKS and markup is None
 
 
 @pytest.mark.asyncio

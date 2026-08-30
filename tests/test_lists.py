@@ -423,7 +423,9 @@ async def test_list_archives_when_everything_is_bought(
 
     assert shopping.archived is True
     assert await repo.active_list(session, family.id) is None
-    assert texts.LIST_ALL_DONE in call.edits[-1][0]
+    # Панель схлопнулась: вместо зачёркнутых строк — итог (этап 10)
+    assert "куплено 3 из 3" in call.edits[-1][0]
+    assert _numbered(call.edits[-1][0]) == []
 
 
 @pytest.mark.asyncio
@@ -493,14 +495,20 @@ async def test_explicit_close_survives_the_next_tap(
 @pytest.mark.asyncio
 async def test_closed_list_panel_says_so(session, family, shopping, bot):
     """Иначе панель закрытого списка неотличима от открытой: тот же футер
-    «Тапните номер, чтобы вычеркнуть» и никакого следа закрытия."""
+    «Тапните номер, чтобы вычеркнуть» и никакого следа закрытия.
+
+    С этапа 10 след закрытия — сама схлопнутая панель: итог, дата и остаток
+    вместо тридцати строк с чекбоксами.
+    """
     call = FakeCall(bot, family.chat_id)
     await lists.close_list(
         call, lists.ListCB(action="close", target=shopping.id), session, family, bot
     )
 
-    assert texts.LIST_CLOSED_FOOTER in call.edits[-1][0]
-    assert texts.LIST_HINT not in call.edits[-1][0]
+    text = call.edits[-1][0]
+    assert "куплено 0 из 3" in text
+    assert texts.LIST_HINT not in text
+    assert _numbered(text) == []
 
 
 @pytest.mark.asyncio
@@ -525,6 +533,10 @@ async def test_panel_length_is_measured_with_the_real_footer(session, family, an
         text, markup = lists._render(family, lst, items)
         assert len(text) <= texts.MESSAGE_LIMIT
         assert len(_numbered(text)) == len(_buttons(markup)) - 1
+    # Для `closed=True` проверка с этапа 10 вырождается в «0 == 1 - 1»: панель
+    # схлопнута, строк и чекбоксов нет вовсе. Смысл теста держится на первой
+    # половине цикла; длину схлопнутой панели стережёт
+    # `test_regressions_live.test_collapsed_panel_stays_short`
 
 
 @pytest.mark.asyncio

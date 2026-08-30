@@ -53,9 +53,13 @@ def _rows(*rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 
 CANCEL_KB = _rows([("❌ Отмена", CANCEL)])
 
+# Подписи берутся из `keyboards.KIND_BUTTONS`, а не пишутся здесь заново.
+# До этапа 10 их было две построчно совпадающие копии — комментарий у
+# `KIND_BUTTONS` при этом утверждал, что подписи общие, и смена значка задачи
+# развела бы мастер с карточкой разбора молча
 KIND_KB = _rows(
-    [("✅ Задача", "new:kind:task"), ("📝 Заметка", "new:kind:note")],
-    [("📅 Событие", "new:kind:event"), ("🛒 Покупка", "new:kind:shopping")],
+    [(text, f"new:kind:{kind}") for text, kind in kb.KIND_BUTTONS[:2]],
+    [(text, f"new:kind:{kind}") for text, kind in kb.KIND_BUTTONS[2:]],
     [("❌ Отмена", CANCEL)],
 )
 

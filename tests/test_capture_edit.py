@@ -306,7 +306,7 @@ async def test_kind_tap_keeps_the_draft(run, model, session, family, anya, bot):
 
     assert (card.chat.id, card.message_id) in capture._drafts
     _, markup = card.edits[-1]
-    assert markup.inline_keyboard[0][0].text == "✅ Задача"
+    assert markup.inline_keyboard[0][0].text == kb.KIND_BUTTONS[0][0]
 
 
 @pytest.mark.asyncio

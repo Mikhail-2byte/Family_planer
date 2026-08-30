@@ -12,7 +12,14 @@ from bot.db.models import Entry, Member
 
 BTN_TODAY = "📅 Сегодня"
 BTN_BUY = "🛒 Покупки"
-BTN_TASKS = "✅ Задачи"
+BTN_TASKS = "📋 Задачи"
+# Подпись до этапа 10 (30.08.2026). Удалять нельзя: нижняя клавиатура живёт
+# в клиенте до первого сообщения, где есть `main_keyboard()`, — а `cmd_tasks`
+# при непустом списке отдаёт inline-разметку и клавиатуру не обновляет вовсе.
+# У неактивного участника старая подпись провисит месяцами, и тап по ней
+# ушёл бы в тишину: `views` не совпал, а обычный текст `IsTrigger` не
+# пропускает. Ловится расширенным фильтром в `views.cmd_tasks`
+LEGACY_BTN_TASKS = "✅ Задачи"
 BTN_NOTES = "📝 Заметки"
 BTN_NEW = "➕ Новое"
 BTN_VOICE = "🎤 Голосом"
@@ -32,7 +39,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-BTN_SAVE = "✅ Сохранить"
+BTN_SAVE = "💾 Сохранить"
 BTN_CANCEL = "❌ Отмена"
 
 
@@ -78,7 +85,7 @@ class EntryCB(CallbackData, prefix="ent"):
     value: int = 0
 
 
-BTN_SAVE_ANYWAY = "✅ Всё равно сохранить"
+BTN_SAVE_ANYWAY = "💾 Всё равно сохранить"
 BTN_EDIT_DATE = "📅 Дата"
 BTN_EDIT_KIND = "🔀 Тип"
 BTN_EDIT_TEXT = "✏️ Текст"
@@ -143,7 +150,7 @@ def capture_keyboard(
 # Подписи те же, что у мастера /new, — тип записи человек выбирает одинаково
 # независимо от того, каким путём она заводится
 KIND_BUTTONS = [
-    ("✅ Задача", "task"),
+    ("📋 Задача", "task"),
     ("📝 Заметка", "note"),
     ("📅 Событие", "event"),
     ("🛒 Покупка", "shopping"),
@@ -181,6 +188,17 @@ def capture_kind_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+# Подпись кнопки закрытия зависит от страницы. Заметку не «выполняют» — её
+# убирают с глаз, и слово об этом уже есть в ответе на тап (`texts.NOTE_CLOSED`
+# против `DONE_CONFIRMED`); до этапа 10 сама кнопка об этом молчала.
+#
+# Нового аргумента для этого не понадобилось: `view` у функции уже есть.
+# И, что важнее, **`DoneCB` не тронут** — меняется только подпись, а
+# `callback_data` остаётся байт-в-байт прежней, поэтому кнопки, уже висящие в
+# чате, продолжают работать
+DONE_LABEL_BY_VIEW = {"tasks": "✅", "notes": "🗄", "events": "✅"}
+
+
 def entry_list_keyboard(
     entries: Sequence[Entry], view: str, offset: int, total: int, page_size: int
 ) -> InlineKeyboardMarkup | None:
@@ -206,7 +224,7 @@ def entry_list_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"✅ {i}",
+                    text=f"{DONE_LABEL_BY_VIEW.get(view, '✅')} {i}",
                     callback_data=DoneCB(entry_id=e.id, offset=offset).pack(),
                 ),
                 InlineKeyboardButton(

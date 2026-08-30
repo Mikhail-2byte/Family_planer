@@ -95,7 +95,12 @@ def _keyboard(items: list[Entry], lst: ListModel) -> InlineKeyboardMarkup | None
     приём и тот же инвариант, что у `keyboards.entry_list_keyboard`: **кнопок
     ровно столько, сколько пронумерованных строк**, иначе тап уйдёт не туда.
     """
-    if not items:
+    # Пустой и **не закрытый** список кнопок не получает вовсе: чекбоксов нет,
+    # а «🧹 Список закрыт» ему давать нельзя — тап провёл бы его в архив мимо
+    # правила «пустой список закрытым не считается» (`repo.sync_list_archived`).
+    # У закрытого пунктов на входе тоже ноль (панель схлопнута), но нижний ряд
+    # ему нужен: без «↩️ Вернуть в работу» он становится недостижим
+    if not items and not lst.archived:
         return None
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
@@ -147,7 +152,7 @@ def _render(
     family: Family, lst: ListModel, items: list[Entry]
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     text, shown = texts.shopping_panel(
-        lst.name, items, family.tz, closed=lst.archived
+        lst.name, items, family.tz, closed=lst.archived, closed_at=lst.closed_at
     )
     return text, _keyboard(items[:shown], lst)
 
@@ -332,11 +337,14 @@ async def tick(
         await call.answer(texts.LIST_ITEM_GONE, show_alert=True)
         return
 
-    if entry.status == "open":
-        await repo.reopen_list(session, lst)
-
-    # Без текста: зачёркивание в панели и есть обратная связь
-    await call.answer()
+    if entry.status == "open" and not await repo.reopen_list(session, lst):
+        # Список уже сменился преемником, и оживлять его нельзя: двух открытых
+        # списков у семьи не бывает. Галка при этом снята — пункт остался
+        # открытым там, где лежал, и виден в остатке схлопнутой панели
+        await call.answer(texts.LIST_SUPERSEDED, show_alert=True)
+    else:
+        # Без текста: зачёркивание в панели и есть обратная связь
+        await call.answer()
     # В панели дня есть счётчик покупок — она обязана узнать об изменении.
     # Здесь `schedule` уместен именно потому, что панель дня фоновая: серия
     # тапов в магазине склеится дебаунсом в одну её правку
@@ -393,7 +401,9 @@ async def reopen(
         await call.answer(texts.LIST_ITEM_GONE, show_alert=True)
         return
 
-    await repo.reopen_list(session, lst)
+    if not await repo.reopen_list(session, lst):
+        await call.answer(texts.LIST_SUPERSEDED, show_alert=True)
+        return
     await call.answer(texts.LIST_REOPENED)
     panel.schedule(bot, family.id, call.message.message_id)
     async with _locks.setdefault(lst.id, asyncio.Lock()):

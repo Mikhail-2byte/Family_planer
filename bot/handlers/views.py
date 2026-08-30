@@ -172,7 +172,10 @@ async def _render_page(
 
 
 @router.message(Command("tasks"))
-@router.message(F.text == kb.BTN_TASKS)
+# Старая подпись кнопки ловится наравне с новой: клавиатура в клиенте
+# обновляется только сообщением с `main_keyboard()`, а этот хендлер при
+# непустом списке отдаёт inline-разметку. См. `keyboards.LEGACY_BTN_TASKS`
+@router.message(F.text.in_({kb.BTN_TASKS, kb.LEGACY_BTN_TASKS}))
 async def cmd_tasks(message: Message, session: AsyncSession, family: Family) -> None:
     text, markup = await _render_page(session, family, "tasks", 0)
     # Inline и нижняя клавиатура в одном сообщении несовместимы, поэтому нижняя

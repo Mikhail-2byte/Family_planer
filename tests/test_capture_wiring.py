@@ -504,3 +504,24 @@ async def test_entry_card_tap_resolves_its_arguments(wired):
     await dp.feed_update(bot, Update(update_id=77, callback_query=tap))
 
     assert telegram.edited and "Позвонить маме" in telegram.edited[-1]
+
+
+@pytest.mark.asyncio
+async def test_legacy_tasks_button_still_opens_the_page(wired):
+    """Этап 10 сменил подпись кнопки с «✅ Задачи» на «📋 Задачи».
+
+    Сторож, а не регрессия: на коде «до правки» он зелёный, потому что старая
+    подпись тогда и была единственной. Краснеет он в другом случае — если
+    `LEGACY_BTN_TASKS` однажды сочтут мусором и уберут.
+
+    Убирать нельзя: нижняя клавиатура обновляется в клиенте только сообщением,
+    где есть `main_keyboard()`, а `views.cmd_tasks` при непустом списке отдаёт
+    inline-разметку и клавиатуру не трогает. У участника, который неделю не
+    писал, старая подпись так и висит, и тап по ней ушёл бы в тишину: `views`
+    не совпал, а обычный текст `IsTrigger` не пропускает.
+    """
+    dp, bot, telegram = wired
+    await dp.feed_update(bot, _update(kb.LEGACY_BTN_TASKS))
+
+    assert telegram.sent == [texts.EMPTY_TASKS]
+

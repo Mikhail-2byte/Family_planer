@@ -154,13 +154,31 @@ async def test_find_stays_under_the_telegram_limit(session, family, anya):
 
 @pytest.mark.asyncio
 async def test_day_digest_stays_under_the_telegram_limit(session, family, anya):
-    """MAX_DAY_ITEMS × 500 символов — 7500, то есть отказ и молча потерянная сводка."""
+    """MAX_DAY_ITEMS × 500 символов — 7500, то есть отказ и молча потерянная сводка.
+
+    С этапа 10 блоков четыре, и записей здесь хватает на каждый. Бюджет у них
+    общий и бегущий, а до этапа 10 день был последним блоком, и после него
+    бюджет не вычитался вовсе. Забыть эту строку при добавлении новых блоков
+    было проще всего — и ловится это ровно здесь: с такой ошибкой «Дальше» и
+    «Без срока» посчитали бы остаток так, будто дня в сообщении нет, и дописали
+    бы своё поверх лимита. Сколько блоков доживёт до текста — не проверяем: это
+    и есть работа бюджета, а обрезается по замыслу справочный хвост, а не день.
+    """
     await _many_long_entries(
         session, family, anya, texts.MAX_DAY_ITEMS, due_at=_msk(2026, 8, 27, 10, 0)
     )
+    await _many_long_entries(
+        session, family, anya, texts.MAX_DAY_ITEMS, due_at=_msk(2026, 8, 20, 10, 0)
+    )
+    await _many_long_entries(
+        session, family, anya, texts.MAX_DAY_ITEMS, due_at=_msk(2026, 9, 15, 10, 0)
+    )
+    await _many_long_entries(session, family, anya, texts.MAX_DAY_ITEMS)
 
     body, has_content = await digest.build_day(session, family, NOW)
     assert has_content
+    # Проверка не холостая: самый важный блок обязан дожить до текста
+    assert texts.HEADER_OVERDUE in body
     # Запас на рамки, в которые сводку заворачивают снаружи: заголовок
     # дайджеста, пометка об опоздании, рамка панели
     assert len(body) <= texts.MESSAGE_LIMIT - texts.DAY_RESERVE

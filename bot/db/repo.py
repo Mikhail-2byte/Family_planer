@@ -152,17 +152,100 @@ async def entries_for_range(
 async def overdue_entries(
     session: AsyncSession, family_id: int, before_utc: datetime | None = None
 ) -> list[Entry]:
+    """Открытое, чей срок уже прошёл. Заметки сюда не попадают никогда.
+
+    Заметка — то, что надо **помнить**, а не сделать, и «просрочить» её нельзя.
+    До этапа 10 разницы между заметкой и задачей не было вовсе, и заметка с
+    прошедшей датой висела в «Просрочено» каждое утро — а следом попадала в
+    разбор незакрытого, где ей предлагали «закрыть» или «перенести»: оба
+    действия к записанному факту неприменимы.
+
+    Фильтр стоит здесь, а не в `digest.build_day`, потому что ту же выборку
+    читает `services/review.overdue`, и списки сводки и разбора обязаны
+    совпадать — иначе человек видит запись в сводке, не находит под ней кнопки
+    и решает, что кнопка пропала.
+    """
     result = await session.scalars(
         select(Entry)
         .where(
             Entry.family_id == family_id,
             Entry.status == "open",
+            Entry.kind != "note",
             Entry.due_at.is_not(None),
             Entry.due_at < (before_utc or now_utc()),
         )
         .order_by(Entry.due_at)
     )
     return list(result)
+
+
+# Виды, которые вообще могут показаться в сводке дня отдельным блоком.
+# Список **белый, а не чёрный** («всё, кроме shopping»), и это не вкусовщина:
+# пункт списка покупок — это ровно `status='open'` без `due_at`, то есть он
+# подходит под выборку «без срока» по всем признакам. С чёрным списком
+# следующий заведённый вид протёк бы в сводку молча
+DAY_BLOCK_KINDS = ("task", "note", "event")
+UNDATED_KINDS = ("task", "note")
+
+
+async def upcoming_entries(
+    session: AsyncSession, family_id: int, after_utc: datetime, *, limit: int
+) -> list[Entry]:
+    """Ближайшее из будущего — блок «Дальше» в сводке дня (этап 10).
+
+    До неё завтрашняя задача была видна только на своей странице: `/today` берёт
+    ровно окно суток, и «завтра в 12:00» в него не попадает. Человек с пустым
+    сегодня видел «ничего не запланировано» и не знал, что назавтра его ждёт
+    звонок.
+
+    Режем **в SQL**, а не хвостом `entry_lines`: тот дописал бы «…и ещё 47» — то
+    есть счётчик всего будущего семьи, который ничего не сообщает. У соседней
+    `undated_entries` наоборот, и разная форма у двух функций намеренная.
+
+    Только `open`, в отличие от `entries_for_range` с её `("open","done")`:
+    сделанное сегодня в дне уместно зачёркнутым, сделанное в будущем —
+    бессмыслица. `ARCHIVED` отсекается тем же условием.
+    """
+    result = await session.scalars(
+        select(Entry)
+        .where(
+            Entry.family_id == family_id,
+            Entry.status == "open",
+            Entry.kind.in_(DAY_BLOCK_KINDS),
+            Entry.due_at.is_not(None),
+            Entry.due_at >= after_utc,
+        )
+        .order_by(Entry.due_at)
+        .limit(limit)
+    )
+    return list(result)
+
+
+async def undated_entries(
+    session: AsyncSession, family_id: int, *, limit: int
+) -> tuple[list[Entry], int]:
+    """Открытое без срока — блок «Без срока» в сводке дня (этап 10).
+
+    Страница плюс общее число, как у `entries_by_kind`: хвост «…и ещё N» здесь
+    полезен — он говорит, сколько дел лежит нерасписанными, и это осмысленная
+    цифра.
+
+    Фильтр по виду обязателен и обязан быть **белым списком** (`UNDATED_KINDS`).
+    На отсутствии `due_at` у пунктов списка покупок держится то, что они не
+    протекают в день, — а у этой выборки фильтра по `due_at` нет по определению.
+    `ARCHIVED` отсекается условием `status == "open"`.
+    """
+    where = (
+        Entry.family_id == family_id,
+        Entry.status == "open",
+        Entry.kind.in_(UNDATED_KINDS),
+        Entry.due_at.is_(None),
+    )
+    total = await session.scalar(select(func.count()).select_from(Entry).where(*where))
+    result = await session.scalars(
+        select(Entry).where(*where).order_by(Entry.created_at.desc()).limit(limit)
+    )
+    return list(result), int(total or 0)
 
 
 async def entries_by_kind(
@@ -807,26 +890,44 @@ async def sync_list_archived(session: AsyncSession, lst: ListModel) -> bool:
     )
     if total and not open_left:
         lst.archived = True
+        lst.closed_at = now_utc()
         await session.commit()
     return lst.archived
 
 
-async def reopen_list(session: AsyncSession, lst: ListModel) -> None:
-    """Вернуть список в работу: снятая галка отменяет промах пальцем.
+async def reopen_list(session: AsyncSession, lst: ListModel) -> bool:
+    """Вернуть список в работу. `False` — если у семьи уже открыт другой.
 
-    Зовётся ровно из одного места — тапа, который перевёл пункт в «открыт».
-    Тап в другую сторону (купили ещё один) закрытый список не оживляет: человек
-    закрыл его сознательно.
+    Зовут отсюда двое: кнопка «↩️ Вернуть в работу» и тап, снявший галку
+    (промах пальцем в магазине обязан отменяться тем же движением). Тап в
+    другую сторону закрытый список не оживляет: человек закрыл его сознательно.
+
+    Отказ появился на этапе 10 и закрывает зомби-список. Панелей списка в чате
+    лежит стопка, и тап по старой оживлял список, у которого уже был преемник.
+    Дальше он пропадал **отовсюду**: `active_list` берёт последний по id, то
+    есть новый, а `closed_list_with_leftovers` требует `archived IS TRUE` —
+    разархивированный не находился и там. Список оставался жив только в уже
+    висящем сообщении.
+
+    Проверка стоит здесь, а не в хендлере: «у семьи не больше одного открытого
+    списка» — это инвариант данных, и хендлеров, зовущих сюда, двое.
     """
-    if lst.archived:
-        lst.archived = False
-        await session.commit()
+    if not lst.archived:
+        return True
+    other = await active_list(session, lst.family_id)
+    if other is not None and other.id != lst.id:
+        return False
+    lst.archived = False
+    lst.closed_at = None
+    await session.commit()
+    return True
 
 
 async def close_list(session: AsyncSession, lst: ListModel) -> None:
     """Закрыть список явно, не вычёркивая остаток («сметаны не было»)."""
     if not lst.archived:
         lst.archived = True
+        lst.closed_at = now_utc()
         await session.commit()
 
 
