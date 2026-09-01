@@ -15,8 +15,14 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+#
+# `disable_existing_loggers=False` дописано руками, и это не косметика.
+# По умолчанию `fileConfig` глушит **все** уже созданные логгеры, а `env.py`
+# импортируется не только процессом alembic: его зовёт `tests/test_migrations.py`.
+# После него любой `bot.*` логгер в том же прогоне молчал, и тест, проверяющий
+# лог через `caplog`, был зелёным или красным в зависимости от порядка файлов.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

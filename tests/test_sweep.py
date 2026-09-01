@@ -8,6 +8,7 @@
 `export.to_ics`.
 """
 
+import logging
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -348,6 +349,76 @@ async def test_one_by_one_has_a_budget(session, family, morning, monkeypatch):
     await digest.send_pending(stubborn, session, now)
 
     assert len(stubborn.deleted_one) <= 5
+
+
+@pytest.mark.asyncio
+async def test_budget_covers_a_whole_window(session, family, morning, monkeypatch):
+    """Баг, из-за которого этап 11 не работал ни одного боевого утра.
+
+    Окно было тысячей, бюджет поштучных — сотней. Пока пачки уходят целиком,
+    разницы не видно; но первая же неудаляемая история роняет пачку, уборка
+    переходит на поштучный разбор и упирается в сотню. Чат за сутки прирастает
+    быстрее, чем сто сообщений: знак полз по старью, до свежих сообщений очередь
+    не доходила никогда, и в чате не исчезало **ничего**.
+
+    Тест на коде «до правки» красный: `deleted_one` обрывался на сотне.
+    """
+    monkeypatch.setattr(sweep, "SINGLE_PAUSE", 0)
+    now = await morning(swept_upto=0)
+    # Завал в 250 сообщений и служебное среди них: каждая пачка падает целиком
+    stubborn = FakeBot(
+        fail_on_delete={i: _bad("message can't be deleted") for i in range(10)}
+    )
+    stubborn._next_id = 250
+
+    await digest.send_pending(stubborn, session, now)
+
+    assert stubborn.deleted_one == list(range(1, 251)), "весь завал за одно утро"
+    await session.refresh(family)
+    assert family.swept_upto == 250
+
+
+@pytest.mark.asyncio
+async def test_a_fruitless_sweep_says_so_out_loud(
+    session, family, morning, monkeypatch, caplog
+):
+    """Вторая половина того же бага: уборка была нема.
+
+    `delete_one` про отказ не говорил ничего, итога не подводил никто — и утро,
+    в которое не удалилось ни одного сообщения, выглядело в логе ровно так же,
+    как удачное. Два боевых утра подряд уборка не делала ничего, и понять это по
+    логу было нечем.
+
+    Ноль удалённых при непустых отказах — почти всегда одно из двух: сообщения
+    старше 48 часов либо снятое право «удалять сообщения». И то и другое общее
+    для всего чата, а не свойство пачки, поэтому строка обязана быть WARNING.
+    """
+    monkeypatch.setattr(sweep, "SINGLE_PAUSE", 0)
+    now = await morning(swept_upto=90)
+    deaf = FakeBot(
+        fail_on_delete={0: _bad("message can't be deleted")},
+        fail_on_delete_one={
+            i: _bad("message can't be deleted") for i in range(10)
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="bot.services.sweep"):
+        await digest.send_pending(deaf, session, now)
+
+    assert any(
+        "не удалилось ничего" in r.getMessage() for r in caplog.records
+    ), "молчание об этом — и есть баг"
+
+
+@pytest.mark.asyncio
+async def test_a_working_sweep_reports_the_count(session, family, bot, morning, caplog):
+    """Зеркало предыдущего: удачное утро тоже обязано быть видно в логе."""
+    now = await morning(swept_upto=50)
+
+    with caplog.at_level(logging.INFO, logger="bot.services.sweep"):
+        await digest.send_pending(bot, session, now)
+
+    assert any("удалено 50 из 50" in r.getMessage() for r in caplog.records)
 
 
 # --- панели -------------------------------------------------------------------
