@@ -14,7 +14,7 @@ from bot.config import settings
 from bot.db.session import engine
 from bot.handlers import routers
 from bot.middlewares import FamilyMiddleware
-from bot.services import panel, ticker
+from bot.services import lock, panel, ticker
 
 # Файл пишем сами, а не редиректом shell, и это не удобство. При `>> bot.log`
 # кодировку выбирает Python по локали Windows, а не по кодовой странице консоли:
@@ -105,6 +105,20 @@ async def main() -> None:
         log.error("BOT_TOKEN пуст. Заполните его в .env — токен даёт @BotFather.")
         sys.exit(1)
 
+    # Замок берём до всего остального, и до `delete_webhook` в особенности:
+    # второй экземпляр, дошедший до него, выбрасывает очередь Telegram, которую
+    # первый ещё не забрал. Порядок здесь не стилистический
+    guard = lock.SingleInstance()
+    if not guard.acquire():
+        # Не ошибка, а сработавшая защита, поэтому код возврата нулевой:
+        # ненулевой заставил бы «Перезапуск при сбое» долбиться каждые две минуты
+        log.warning(
+            "Бот уже запущен — этот экземпляр не нужен (замок %s). "
+            "Два long polling на одном токене теряют сообщения молча.",
+            lock.PATH,
+        )
+        return
+
     bot = make_bot()
     dp = Dispatcher()
     dp.update.outer_middleware(FamilyMiddleware())
@@ -134,6 +148,10 @@ async def main() -> None:
                 await step
             except Exception:
                 log.exception("Ошибка при остановке")
+        # Последним, когда всё уже закрыто: пока замок наш, второй экземпляр не
+        # начнёт поднимать то, что мы ещё не отпустили. Жёсткое убийство сюда не
+        # доходит, и это нормально — замок ОС снимается вместе с процессом
+        guard.release()
 
 
 if __name__ == "__main__":
