@@ -82,10 +82,10 @@ def _state():
 
 @pytest.fixture
 def no_model(monkeypatch):
-    """OpenRouter недоступен: и сеть, и неверный ключ дают одинаковый `None`."""
+    """OpenRouter недоступен — разбор уходит на `dateparser`."""
 
     async def fake_ask(system, user, **kwargs):
-        return None
+        return llm.Answer(reason=llm.UNAVAILABLE, model="test/model")
 
     monkeypatch.setattr(llm, "ask", fake_ask)
 
@@ -94,7 +94,9 @@ def no_model(monkeypatch):
 def model(monkeypatch):
     def use(reply):
         async def fake_ask(system, user, **kwargs):
-            return reply
+            if reply is None:
+                return llm.Answer(reason=llm.UNAVAILABLE, model="test/model")
+            return llm.Answer(data=reply, model="test/model")
 
         monkeypatch.setattr(llm, "ask", fake_ask)
 
@@ -144,7 +146,7 @@ async def test_fallback_shows_a_card_when_the_model_is_down(run, no_model):
     message, card = await run("забрать посылку завтра в 19:00")
 
     assert card is not None
-    assert texts.CAPTURE_VIA_FALLBACK in message.replies[0]
+    assert texts.capture_fallback_note(llm.UNAVAILABLE) in message.replies[0]
     draft = _draft(card)
     assert draft.via == "dateparser"
     item = draft.items[0]
@@ -187,7 +189,7 @@ async def test_fallback_refuses_recurring_instead_of_guessing(run, no_model):
     message, card = await run("выносить мусор каждый вторник в 19:00")
 
     assert card is None
-    assert message.replies == [texts.CAPTURE_RECURRING_FALLBACK]
+    assert message.replies == [texts.capture_recurring_fallback(llm.UNAVAILABLE)]
     assert capture._drafts == {}
 
 
@@ -196,7 +198,7 @@ async def test_fallback_gives_up_and_offers_the_wizard(run, no_model):
     message, card = await run("абракадабра")
 
     assert card is None
-    assert message.replies == [texts.CAPTURE_FAILED]
+    assert message.replies == [texts.capture_failed(llm.UNAVAILABLE)]
     assert capture._drafts == {}
 
 

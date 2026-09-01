@@ -83,9 +83,13 @@ def answer(monkeypatch):
     calls: list[tuple[str, str]] = []
 
     def use(reply):
+        """`reply` — разбор от модели либо `None` как «модель не ответила»."""
+
         async def fake_ask(system, user, **kwargs):
             calls.append((system, user))
-            return reply
+            if reply is None:
+                return llm.Answer(reason=llm.UNAVAILABLE, model="test/model")
+            return llm.Answer(data=reply, model="test/model")
 
         monkeypatch.setattr(llm, "ask", fake_ask)
         return calls
@@ -134,9 +138,9 @@ async def test_chitchat_says_nothing(carded):
 
 @pytest.mark.asyncio
 async def test_llm_failure_answers_once_and_shows_no_card(carded):
-    """Сеть, ключ, отказ провайдера — наружу приходят одинаково, как `None`."""
+    """Отказ модели — один ответ и никакой карточки."""
     message, _ = await carded(None)
-    assert message.texts == [texts.CAPTURE_FAILED]
+    assert message.texts == [texts.capture_failed(llm.UNAVAILABLE)]
     assert capture._drafts == {}  # ответ ушёл, но черновика за ним нет
 
 
@@ -446,9 +450,10 @@ async def test_quota_stops_the_call_and_says_so(carded, monkeypatch, session, fa
     message, _ = await carded(_reply(_item()))
 
     assert calls == 0, "заведомый отказ не стоит трёх попыток с паузами"
-    assert texts.CAPTURE_QUOTA_SPENT in message.texts
-    # И разбор всё равно состоялся — запасным путём, а не молчанием
-    assert len(message.texts) > 1
+    # Разбор всё равно состоялся — запасным путём, а не молчанием, и карточка
+    # называет причину: до этапа 12 она говорила безликое «Разобрал без ИИ»
+    assert message.cards, "разбор обязан был состояться запасным путём"
+    assert any(texts.ai_reason(llm.QUOTA) in text for text in message.texts)
 
 
 @pytest.mark.asyncio
@@ -463,4 +468,4 @@ async def test_zero_limit_means_no_limit(carded, monkeypatch):
     message, card = await carded(_reply(_item()))
 
     assert card is not None
-    assert texts.CAPTURE_QUOTA_SPENT not in message.texts
+    assert not any(texts.ai_reason(llm.QUOTA) in text for text in message.texts)

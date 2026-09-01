@@ -121,7 +121,9 @@ def asked(monkeypatch):
     def use(reply):
         async def fake_ask(system, user, **kwargs):
             calls.append(user)
-            return reply
+            if reply is None:
+                return llm.Answer(reason=llm.UNAVAILABLE, model="test/model")
+            return llm.Answer(data=reply, model="test/model")
 
         monkeypatch.setattr(llm, "ask", fake_ask)
         return calls

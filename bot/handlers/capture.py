@@ -70,6 +70,9 @@ class Draft:
     items: list[parsing.Item]
     source_message_id: int  # исходная фраза, а не карточка
     via: str = "llm"  # 'llm' | 'dateparser' — каким путём разобрано
+    # Почему пошли без ИИ; непусто только у 'dateparser'. Без неё карточка на
+    # все двенадцать бед говорила одно и то же — см. этап 12
+    reason: str = ""
     edited: bool = False  # правил ли человек разбор кнопками
 
 
@@ -105,7 +108,7 @@ def _card(draft: Draft, tz: str) -> tuple[str, InlineKeyboardMarkup | None]:
     собираются они в одном месте: разъехавшись, они однажды покажут
     предупреждение без кнопки или наоборот.
     """
-    text = texts.capture_card(draft.items, tz, via=draft.via)
+    text = texts.capture_card(draft.items, tz, via=draft.via, reason=draft.reason)
     warn = any(texts.is_past(item, tz) for item in draft.items)
     markup = kb.capture_keyboard(warn=warn, editable=len(draft.items) == 1)
     return text, markup
@@ -201,34 +204,67 @@ async def handle_phrase(
         [shopping.name] if shopping else [],
     )
 
-    if _quota_spent():
-        # Суточный лимит бесплатного тира — на аккаунт, а не на ключ. Дойдя до
-        # него, провайдер просто начинает отвечать 429, и разбор молча
-        # деградирует до `dateparser`; человек видит «разобрал без ИИ» и думает,
-        # что сломалась сеть. Останавливаемся сами и говорим об этом вслух —
-        # заодно не тратим три попытки с паузами на заведомый отказ
+    if parse_log.quota_spent():
+        # Свой тормоз, а не чужой: дойдя до лимита, провайдер просто начинает
+        # отвечать 429, и разбор молча деградирует до `dateparser` — человек
+        # видит «разобрал без ИИ» и думает, что сломалась сеть. Останавливаемся
+        # сами и говорим об этом вслух, заодно не тратя на заведомый отказ всю
+        # цепочку с её повторами
         log.warning("Суточный лимит модели исчерпан: %s", parse_log.calls_today())
-        await message.answer(texts.CAPTURE_QUOTA_SPENT)
-        await _fallback(message, text, family)
+        # Строка с `calls=0` — «хотели пойти к модели, но не пошли». Она же
+        # кормит `parse_log.last_failure`, то есть команду /ai
+        parse_log.write(
+            event="parse",
+            via="llm",
+            chat=message.chat.id,
+            text=text,
+            result="skipped",
+            reason=llm.QUOTA,
+            calls=0,
+        )
+        await _fallback(message, text, family, llm.QUOTA)
         return
 
-    raw = await llm.ask(system, text)
-    if raw is None:
-        # Сеть, ключ, отказ провайдера — наружу всё это приходит одинаково
-        await _fallback(message, text, family)
+    answer = await llm.ask(system, text)
+    if answer.data is None:
+        log.warning(
+            "Разбор без ИИ: %s (%s), пробовал %s, запросов %s",
+            answer.reason,
+            answer.detail,
+            ", ".join(answer.tried),
+            answer.calls,
+        )
+        parse_log.write(
+            event="parse",
+            via="llm",
+            model=answer.model or "-",
+            chat=message.chat.id,
+            text=text,
+            result="failed",
+            reason=answer.reason,
+            detail=answer.detail,
+            tried=list(answer.tried),
+            calls=answer.calls,
+            seconds=round(answer.elapsed, 1),
+        )
+        await _fallback(message, text, family, answer.reason)
         return
 
-    intent, items = parsing.normalize(raw)
+    intent, items = parsing.normalize(answer.data)
     log.info("Разбор: intent=%s, записей=%s", intent, len(items))
     parse_log.write(
         event="parse",
         via="llm",
-        model=settings.openrouter_model,
+        # Фактически ответившая, а не `settings.openrouter_model`: при цепочке
+        # там основная, а ответить могла запасная
+        model=answer.model,
+        calls=answer.calls,
+        seconds=round(answer.elapsed, 1),
         chat=message.chat.id,
         text=text,
         intent=intent,
         items=len(items),
-        answer=raw,
+        answer=answer.data,
     )
 
     if intent == "chitchat":
@@ -247,17 +283,6 @@ async def handle_phrase(
         await _autosave(message, draft, session, family, member, bot)
         return
     await _show_card(message, draft, family.tz)
-
-
-def _quota_spent() -> bool:
-    """Суточный лимит обращений к модели исчерпан?
-
-    Считает только текстовый разбор: голос уходит в Groq, у которого своя
-    квота, — ровно ради этого он и разведён с OpenRouter. `0` в настройке
-    выключает проверку: у платного ключа суточного потолка нет.
-    """
-    limit = settings.llm_daily_limit
-    return bool(limit) and parse_log.calls_today() >= limit
 
 
 def _has_shopping(draft: Draft) -> bool:
@@ -299,13 +324,25 @@ async def _autosave(
     await message.answer(text)
 
 
-async def _fallback(message: Message, payload: str, family: Family) -> None:
+async def _fallback(
+    message: Message, payload: str, family: Family, reason: str
+) -> None:
     """Разбор без модели — `dateparser` и ничего больше (шаг 3b.1).
 
     Умеет он мало: тип записи не определяет, повторяемость не понимает вовсе.
     Зато бот остаётся живым при отвалившемся OpenRouter — это и есть требование
     «не падать и не молчать из-за внешнего сервиса».
+
+    `reason` обязателен и без значения по умолчанию намеренно: забыть его —
+    значит вернуть безликое «Разобрал без ИИ», ровно то, из-за чего 01.09.2026
+    нельзя было понять, сломан ли бот.
+
+    В лог причина едет полем `after`, а не `reason`: по `reason` ищет
+    `parse_log.last_failure`, и он обязан находить строку `via=llm` с ответом
+    провайдера, а не эту — иначе она, будучи новее на ту же секунду, заслоняла
+    бы подробности.
     """
+    log.info("Разбор без ИИ (%s): %.60s", reason, payload)
     if nlp.looks_recurring(payload):
         # `dateparser` выбросит слово «каждый» и молча сделает повтор разовым.
         # Тот же честный отказ, что и в `/remind`
@@ -315,8 +352,9 @@ async def _fallback(message: Message, payload: str, family: Family) -> None:
             chat=message.chat.id,
             text=payload,
             result="recurring",
+            after=reason,
         )
-        await message.answer(texts.CAPTURE_RECURRING_FALLBACK)
+        await message.answer(texts.capture_recurring_fallback(reason))
         return
 
     now_local = tu.to_local(tu.now_utc(), family.tz)
@@ -328,8 +366,9 @@ async def _fallback(message: Message, payload: str, family: Family) -> None:
             chat=message.chat.id,
             text=payload,
             result="failed",
+            after=reason,
         )
-        await message.answer(texts.CAPTURE_FAILED)
+        await message.answer(texts.capture_failed(reason))
         return
 
     due_at, all_day = nlp.as_due(parsed.when, now_local)
@@ -340,6 +379,7 @@ async def _fallback(message: Message, payload: str, family: Family) -> None:
         chat=message.chat.id,
         text=payload,
         result="ok",
+        after=reason,
         title=parsed.text,
         due_at=due_at.isoformat(),
         all_day=all_day,
@@ -354,7 +394,9 @@ async def _fallback(message: Message, payload: str, family: Family) -> None:
         confidence=parsing.LOW_CONFIDENCE,
     )
     await _show_card(
-        message, Draft(family.id, [item], message.message_id, "dateparser"), family.tz
+        message,
+        Draft(family.id, [item], message.message_id, "dateparser", reason=reason),
+        family.tz,
     )
 
 

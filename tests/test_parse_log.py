@@ -145,3 +145,118 @@ def test_write_never_raises(_fresh, monkeypatch):
     # А счётчик всё равно увеличился: вызов к модели состоялся, что бы ни
     # случилось с логом
     assert parse_log._counted == 1
+
+
+# --- Этап 12: счёт в запросах, а не в строках --------------------------------
+#
+# До этапа 12 строка писалась только после удачного разбора, то есть неудачный
+# вызов квоту у провайдера тратил, а счётчик не растил. Защита не срабатывала
+# ровно в сценарии сплошных 429, ради которого написана. С цепочкой моделей
+# одна фраза стоит до девяти запросов, и счёт по строкам разошёлся бы в разы.
+
+
+def test_calls_are_counted_not_lines(_fresh):
+    parse_log.write(event="parse", via="llm", text="раз", calls=3)
+
+    assert parse_log.calls_today() == 3
+
+
+def test_old_lines_without_calls_still_count_as_one(_fresh):
+    """Лог переживает обновление бота: строки этапа 3b поля `calls` не знают."""
+    parse_log.PATH.write_text(
+        json.dumps(
+            {
+                "event": "parse",
+                "via": "llm",
+                "at": datetime.now(UTC).replace(tzinfo=None).isoformat(
+                    timespec="seconds"
+                ),
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert parse_log.calls_today() == 1
+
+
+def test_a_failed_call_counts_too(_fresh):
+    """Неудачный вызов провайдер тоже считает — иначе защита слепа."""
+    parse_log.write(event="parse", via="llm", result="failed", reason="unavailable", calls=2)
+
+    assert parse_log.calls_today() == 2
+
+
+def test_a_skipped_call_costs_nothing(_fresh):
+    """Ветка квоты никуда не ходила — списывать с неё нечего."""
+    parse_log.write(event="parse", via="llm", result="skipped", reason="quota", calls=0)
+
+    assert parse_log.calls_today() == 0
+
+
+def test_probe_counts_against_the_daily_limit(_fresh):
+    """Иначе собственный лимит обходился бы командой /ai."""
+    parse_log.write(event="probe", via="llm", ok=True, calls=1)
+
+    assert parse_log.calls_today() == 1
+
+
+def test_a_broken_calls_field_does_not_break_the_count(_fresh):
+    parse_log.write(event="parse", via="llm", calls="много")
+
+    assert parse_log.calls_today() == 0
+
+
+def test_quota_spent_reads_the_limit_from_settings(_fresh, monkeypatch):
+    monkeypatch.setattr(parse_log.settings, "llm_daily_limit", 2)
+    assert parse_log.quota_spent() is False
+
+    parse_log.write(event="parse", via="llm", calls=2)
+    assert parse_log.quota_spent() is True
+
+
+def test_zero_limit_never_counts_as_spent(_fresh, monkeypatch):
+    """Платный ключ суточного потолка не имеет — проверка обязана выключаться."""
+    monkeypatch.setattr(parse_log.settings, "llm_daily_limit", 0)
+    parse_log.write(event="parse", via="llm", calls=10_000)
+
+    assert parse_log.quota_spent() is False
+
+
+# --- Этап 12: последний отказ для /ai ----------------------------------------
+
+
+def test_last_failure_finds_the_newest_refusal(_fresh):
+    parse_log.write(event="parse", via="llm", reason="unavailable", detail="401 старое")
+    parse_log.write(event="parse", via="llm", reason="bad_json", detail="мусор")
+
+    record = parse_log.last_failure()
+
+    assert record is not None
+    assert record["reason"] == "bad_json"
+
+
+def test_last_failure_ignores_the_fallback_line(_fresh):
+    """Строка запасного разбора носит поле `after` и заслонять отказ не должна.
+
+    Она пишется следом за отказом, в ту же секунду, — по времени она новее, и
+    без разницы в именах полей подробности провайдера были бы недостижимы.
+    """
+    parse_log.write(event="parse", via="llm", reason="unavailable", detail="401 GMICloud")
+    parse_log.write(event="parse", via="dateparser", result="ok", after="unavailable")
+
+    record = parse_log.last_failure()
+
+    assert record is not None
+    assert record["detail"] == "401 GMICloud"
+
+
+def test_last_failure_ignores_a_successful_parse(_fresh):
+    parse_log.write(event="parse", via="llm", intent="create", items=1)
+
+    assert parse_log.last_failure() is None
+
+
+def test_last_failure_without_a_log_is_none(_fresh):
+    assert parse_log.last_failure() is None

@@ -1,6 +1,7 @@
 import logging
 import shutil
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot, Router
@@ -10,10 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards as kb
 from bot import texts
+from bot.config import settings
 from bot.db import repo
 from bot.db.models import Family
 from bot.filters import IN_GROUP, IN_PRIVATE
-from bot.services import backup, export
+from bot.services import backup, export, llm, parse_log, sending
 from bot.services import timeutil as tu
 
 router = Router()
@@ -53,6 +55,92 @@ async def cmd_help(message: Message) -> None:
 async def cmd_ping(message: Message, session: AsyncSession, family: Family) -> None:
     members = await repo.members_of(session, family.id)
     await message.answer(texts.pong(family.title or str(family.chat_id), len(members)))
+
+
+@router.message(Command("ai"), IN_GROUP)
+async def cmd_ai(message: Message, family: Family, bot: Bot) -> None:
+    """Живая проверка связи с ИИ (этап 12).
+
+    Заведена после 01.09.2026: провайдер моргнул, разбор ушёл на `dateparser`,
+    и узнать «сломан ИИ или нет» было неоткуда — в чате обе беды выглядели
+    одинаково, а лог лежит на машине бота.
+
+    Запрос настоящий и идёт тем же путём, что разбор: та же цепочка моделей,
+    тот же прокси, тот же `response_format`. Проверка по конфигу («ключ задан»)
+    не поймала бы ровно тот случай, ради которого команда написана.
+
+    Ответ занимает секунды, поэтому первым уходит «Проверяю…», а отчёт
+    приезжает правкой того же сообщения: два сообщения на команду — лишний шум
+    в чате, который потом ещё и убирать утренней уборке.
+    """
+    probe = await message.answer(texts.AI_CHECKING)
+    limit = settings.llm_daily_limit
+    history = True  # показывать ли строку «последний отказ»
+
+    if parse_log.quota_spent():
+        # Живого запроса не делаем: разбор в этом состоянии мы тоже не
+        # отправляем, а иначе командой обходился бы собственный суточный лимит
+        blocks = [texts.ai_quota(parse_log.calls_today(), limit)]
+    else:
+        answer = await llm.ask(llm.PROBE_SYSTEM, llm.PROBE_USER)
+        parse_log.write(
+            event="probe",
+            via="llm",
+            model=answer.model or "-",
+            chat=message.chat.id,
+            ok=answer.ok,
+            reason=answer.reason,
+            detail=answer.detail,
+            tried=list(answer.tried),
+            calls=answer.calls,
+            seconds=round(answer.elapsed, 1),
+        )
+        calls = parse_log.calls_today()
+        if answer.ok:
+            blocks = [texts.ai_ok(answer.model, answer.elapsed, calls, limit)]
+            if answer.tried and answer.model != answer.tried[0]:
+                blocks.append(texts.ai_after_fallback(answer.tried[0]))
+        else:
+            blocks = [
+                texts.ai_down(
+                    answer.reason,
+                    answer.tried,
+                    answer.elapsed,
+                    answer.detail,
+                    calls,
+                    limit,
+                )
+            ]
+            # Историю отказов не показываем: свежайший из них — эта же проба,
+            # и строка «последний отказ: только что» повторила бы блок выше
+            history = False
+
+    if history:
+        blocks.append(_last_failure_line(family.tz))
+    # Голос проверяем по конфигу, живого запроса в Groq не делаем: аудио для
+    # пробы нет, а пустой файл Whisper-эндпоинт отвергает 400 — рабочий ключ от
+    # нерабочего это не отличило бы, зато стоило бы запроса из чужой квоты
+    blocks.append(
+        texts.ai_voice(settings.stt_model) if settings.stt_key else texts.AI_VOICE_OFF
+    )
+    report = "\n\n".join(blocks)
+
+    if probe and await sending.edit(bot, family, probe.message_id, report) == sending.OK:
+        return
+    await message.answer(report)
+
+
+def _last_failure_line(tz: str) -> str:
+    """Когда ИИ отказывал в последний раз — по `parse.log`."""
+    record = parse_log.last_failure()
+    if record is None:
+        return texts.AI_NO_FAILURES
+    try:
+        # В логе наивный UTC, а показываем в таймзоне семьи
+        moment = datetime.fromisoformat(str(record.get("at")))
+    except (TypeError, ValueError):
+        return texts.AI_NO_FAILURES
+    return texts.ai_last_failure(tu.fmt_when(moment, tz), str(record.get("reason", "")))
 
 
 @router.message(Command("backup"), IN_GROUP)

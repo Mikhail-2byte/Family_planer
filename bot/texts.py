@@ -66,6 +66,7 @@ COMMANDS = [
     ("backup", "Прислать файл базы"),
     ("cancel", "Прервать мастер /new"),
     ("ping", "Проверить, жив ли бот"),
+    ("ai", "Проверить, жив ли ИИ"),
 ]
 
 # Справка. До неё узнать про `+`, про реплай и про кнопку «🎤 Голосом» было
@@ -221,7 +222,9 @@ CAPTURE_TOO_LONG = (
 CAPTURE_STALE = "Эта карточка устарела — напишите фразу заново."
 CAPTURE_ALIEN = "Это карточка другого чата."
 CAPTURE_EMPTY = "Не понял, что записать. Попробуйте /new — там по шагам."
-CAPTURE_FAILED = "Не смог разобрать фразу. Попробуйте /new — там по шагам."
+CAPTURE_FAILED = (
+    "Не смог разобрать фразу — {reason}. Попробуйте /new — там по шагам."
+)
 # intent query и complete модель различает, но обработки у них не будет до
 # следующего этапа. Молчать нельзя: к боту обратились явно
 CAPTURE_NOT_YET = (
@@ -241,18 +244,46 @@ CAPTURE_RRULE_BAD = (
 # Про это надо сказать вслух, иначе человек подтвердит кнопкой худший разбор,
 # думая, что видит обычный
 CAPTURE_VIA_FALLBACK = (
-    "<i>Разобрал без ИИ — только дату и текст. Проверьте внимательнее.</i>"
-)
-# Суточный лимит модели исчерпан. Говорим вслух, потому что молчание тут
-# неотличимо от поломки: разбор просто становится хуже, а почему — неясно
-CAPTURE_QUOTA_SPENT = (
-    "На сегодня лимит обращений к ИИ исчерпан — разберу попроще, "
-    "только дату и текст. Завтра будет как обычно."
+    "<i>Разобрал без ИИ — {reason}. "
+    "Только дата и текст, проверьте внимательнее.</i>"
 )
 CAPTURE_RECURRING_FALLBACK = (
-    "Модель сейчас недоступна, а повтор («каждый вторник») простым разбором "
-    "не понять. Заведите запись через /new."
+    "Повтор («каждый вторник») без ИИ не разобрать, а {reason}. "
+    "Заведите запись через /new."
 )
+
+# Почему разбор пошёл без ИИ. Одна фраза на все двенадцать причин и была бедой
+# 01.09.2026: «Разобрал без ИИ» человек читал одинаково и когда моргнул
+# провайдер, и когда кончился суточный лимит, и когда ключ вообще не задан, —
+# отличить поломку от нормальной работы было нечем.
+#
+# Ключи — константы причин из `services/llm.py`. Экранирование тут не нужно и
+# не должно появиться: значения свои, ничего от провайдера сюда не попадает
+AI_REASONS = {
+    "unavailable": "ИИ сейчас не отвечает",
+    "quota": "на сегодня лимит обращений к ИИ исчерпан",
+    "no_key": "ключ ИИ не задан в настройках бота",
+    "no_model": "модель ИИ не задана в настройках бота",
+    "bad_json": "ИИ ответил непонятно",
+}
+AI_REASON_UNKNOWN = "ИИ недоступен"
+
+
+def ai_reason(reason: str) -> str:
+    """Причина словами. Неизвестная — общая фраза, а не пустое место."""
+    return AI_REASONS.get(reason, AI_REASON_UNKNOWN)
+
+
+def capture_fallback_note(reason: str) -> str:
+    return CAPTURE_VIA_FALLBACK.format(reason=ai_reason(reason))
+
+
+def capture_failed(reason: str) -> str:
+    return CAPTURE_FAILED.format(reason=ai_reason(reason))
+
+
+def capture_recurring_fallback(reason: str) -> str:
+    return CAPTURE_RECURRING_FALLBACK.format(reason=ai_reason(reason))
 
 # Дата в прошлом — не ошибка разбора, а опечатка человека («12.03» в сентябре).
 # Тикер отработал бы такое напоминание догонкой и выстрелил в ближайший тик
@@ -661,6 +692,7 @@ def capture_card(
     now: datetime | None = None,
     *,
     via: str = "llm",
+    reason: str = "",
 ) -> str:
     """Превью разбора до сохранения (шаг 3a.6).
 
@@ -677,7 +709,7 @@ def capture_card(
         head = f"{i}. " if numbered else ""
         blocks.append(head + _item_block(item, tz, now))
     if via != "llm":
-        blocks.append(CAPTURE_VIA_FALLBACK)
+        blocks.append(capture_fallback_note(reason))
     if any(item.uncertain for item in items):
         blocks.append(CAPTURE_UNCERTAIN)
     return "\n\n".join(blocks)
@@ -1067,3 +1099,109 @@ def export_caption(day: date, count: int) -> str:
 
 def export_ics_caption(count: int) -> str:
     return EXPORT_ICS_CAPTION.format(count=count)
+
+
+# --- Этап 12: проверка связи с ИИ --------------------------------------------
+
+# Заведено после 01.09.2026: провайдер моргнул, разбор ушёл на dateparser, и
+# узнать «сломан ИИ или нет» было неоткуда — в чате обе беды выглядели
+# одинаково, а лог лежит на машине бота.
+
+AI_CHECKING = "Проверяю связь с ИИ…"
+
+AI_OK = (
+    "🤖 <b>ИИ на связи</b>\n\n"
+    "Ответила модель: <code>{model}</code>\n"
+    "Время ответа: {seconds} с\n"
+    "{spent}"
+)
+AI_OK_AFTER_FALLBACK = (
+    "Основная модель <code>{main}</code> не ответила — пошёл по запасной."
+)
+# Заголовок общий на все причины: «не отвечает» соврало бы при пустом ключе,
+# когда бот никуда и не ходил
+AI_DOWN = (
+    "🤖 <b>ИИ недоступен</b>\n\n"
+    "{reason}.\n"
+    "Пробовал: {tried}\n"
+    "Ждал: {seconds} с\n"
+    "Ответ провайдера: <code>{detail}</code>\n"
+    "{spent}\n\n"
+    "Разбираю пока простым способом — только дата и текст."
+)
+AI_QUOTA = (
+    "🤖 <b>Лимит обращений исчерпан</b>\n\n"
+    "{spent}. Живой проверки не делаю — она стоила бы ещё одного запроса.\n"
+    "Завтра будет как обычно."
+)
+AI_LAST_FAILURE = "Последний отказ: {when} — {reason}."
+AI_NO_FAILURES = "Отказов в логе нет."
+AI_VOICE_ON = "Голос: ключ Groq задан, модель <code>{model}</code>."
+AI_VOICE_OFF = "Голос: ключ Groq не задан — кнопка «🎤 Голосом» выключена."
+
+# Расход отдельной строкой, а не подстановкой «из {limit}»: при
+# `LLM_DAILY_LIMIT=0` («не ограничивать») та дала бы «из без ограничения»
+AI_SPENT = "Запросов сегодня: {calls} из {limit}"
+AI_SPENT_FREE = "Запросов сегодня: {calls}, суточный лимит не задан"
+
+# Ответ провайдера в чате обрезаем: разбирать его всё равно будут глазами, а
+# полный текст остаётся в `bot.log`. Резать обязательно ДО экранирования —
+# иначе обрежется `&amp;` посередине, и Telegram откажется разбирать сообщение
+AI_DETAIL_LIMIT = 160
+
+
+def ai_spent(calls: int, limit: int) -> str:
+    if not limit:
+        return AI_SPENT_FREE.format(calls=calls)
+    return AI_SPENT.format(calls=calls, limit=limit)
+
+
+def ai_ok(model: str, seconds: float, calls: int, limit: int) -> str:
+    return AI_OK.format(
+        model=_escape(model),
+        seconds=f"{seconds:.1f}",
+        spent=ai_spent(calls, limit),
+    )
+
+
+def ai_after_fallback(main: str) -> str:
+    return AI_OK_AFTER_FALLBACK.format(main=_escape(main))
+
+
+def ai_down(
+    reason: str,
+    tried: Sequence[str],
+    seconds: float,
+    detail: str,
+    calls: int,
+    limit: int,
+) -> str:
+    """Отчёт об отказе. Имена моделей и текст провайдера — от внешнего API.
+
+    Экранирование тут обязательно: `<` в ответе провайдера превращает отправку
+    в `can't parse entities`, то есть отчёт о поломке сам до чата не доходит.
+    """
+    # Причина здесь начинает предложение, а в карточке стоит в середине
+    # («Разобрал без ИИ — ключ не задан»), поэтому заглавная буква ставится
+    # тут, а не в самом словаре. `capitalize()` не годится: он опустил бы «ИИ»
+    words = ai_reason(reason)
+    return AI_DOWN.format(
+        reason=words[:1].upper() + words[1:],
+        tried=_escape(", ".join(tried)) or "—",
+        seconds=f"{seconds:.1f}",
+        detail=_escape(detail[:AI_DETAIL_LIMIT]) or "—",
+        spent=ai_spent(calls, limit),
+    )
+
+
+def ai_quota(calls: int, limit: int) -> str:
+    return AI_QUOTA.format(spent=ai_spent(calls, limit))
+
+
+def ai_last_failure(when: str, reason: str) -> str:
+    return AI_LAST_FAILURE.format(when=when, reason=ai_reason(reason))
+
+
+def ai_voice(model: str) -> str:
+    return AI_VOICE_ON.format(model=_escape(model))
+

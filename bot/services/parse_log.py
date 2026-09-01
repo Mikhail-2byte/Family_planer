@@ -8,6 +8,12 @@
 (`saved` / `cancelled` / `edited`) — по ним и считается 3b.8. Строки связаны
 `card` — `message_id` карточки: он же ключ черновика.
 
+С этапа 12 сюда же пишется проба связи от `/ai` (`event=probe`) и причина, по
+которой разбор пошёл без ИИ. Причина у неудачной строки `via=llm` называется
+`reason`, а у строки запасного разбора — `after`, и это не небрежность: на
+разнице держится `last_failure`, иначе строка `via=dateparser`, будучи новее на
+ту же секунду, заслоняла бы строку с подробностями отказа.
+
 Токенов и цены тут нет намеренно. Точную стоимость отдаёт страница Activity в
 OpenRouter, а наш подсчёт по токенам был бы оценкой — ровно тем, что пункт 3b.8
 и запрещает.
@@ -60,8 +66,9 @@ def write(**record: Any) -> None:
     record["at"] = datetime.now(UTC).replace(tzinfo=None).isoformat(
         timespec="seconds"
     )
-    if _is_llm_call(record):
-        _bump()
+    spent = _spent_calls(record)
+    if spent:
+        _bump(spent)
     try:
         PATH.parent.mkdir(parents=True, exist_ok=True)
         _rotate()
@@ -90,25 +97,45 @@ def _rotate() -> None:
     log.info("parse.log перевалил %s байт — переложен в .1", MAX_BYTES)
 
 
-def _is_llm_call(record: dict[str, Any]) -> bool:
-    """Строка, стоившая вызова модели.
+def _spent_calls(record: dict[str, Any]) -> int:
+    """Сколько запросов к OpenRouter стоила эта строка.
+
+    До этапа 12 считались строки, а не запросы, и только удачные: неудачный
+    вызов квоту у провайдера тратил, а счётчик не растил — то есть защита не
+    работала ровно там, где нужна, в сценарии сплошных 429. С цепочкой моделей
+    одна фраза стоит до девяти запросов, и счёт по строкам разошёлся бы с
+    правдой в разы.
+
+    Поле `calls`, если оно есть, — истина. У строк, написанных до этапа 12, его
+    нет, и для них работает прежнее правило «строка `via=llm` — это один вызов».
+
+    Проба `/ai` (`event=probe`) считается наравне с разбором: это настоящий
+    запрос к аккаунту, и не считать его значило бы оставить дырку, через
+    которую собственный суточный лимит обходится командой.
 
     Голос (`event=voice`) сюда не входит: он уходит в Groq, у которого своя
     квота, — ровно ради этого он и отделён от OpenRouter.
     """
-    return record.get("event") == "parse" and record.get("via") == "llm"
+    if record.get("event") not in ("parse", "probe"):
+        return 0
+    if "calls" in record:
+        try:
+            return max(0, int(record["calls"]))
+        except (TypeError, ValueError):
+            return 0
+    return 1 if record.get("via") == "llm" else 0
 
 
-def _bump() -> None:
+def _bump(spent: int = 1) -> None:
     global _counted_day, _counted
     today = _today()
     if _counted_day != today:
         _counted_day, _counted = today, 0
-    _counted += 1
+    _counted += spent
 
 
 def calls_today() -> int:
-    """Сколько раз сегодня обращались к модели.
+    """Сколько запросов к модели ушло сегодня.
 
     Первый вызов после старта читает файл, дальше счётчик живёт в памяти.
     Читать на каждое обращение было бы честнее при нескольких процессах, но
@@ -135,10 +162,57 @@ def calls_today() -> int:
                     record = json.loads(line)
                 except ValueError:
                     continue
-                if _is_llm_call(record) and str(record.get("at", "")).startswith(stamp):
-                    _counted += 1
+                if str(record.get("at", "")).startswith(stamp):
+                    _counted += _spent_calls(record)
     except FileNotFoundError:
         pass
     except Exception:
         log.warning("Не удалось пересчитать %s", PATH, exc_info=True)
     return _counted
+
+
+def quota_spent() -> bool:
+    """Суточный лимит обращений к модели исчерпан?
+
+    Считает только обращения к OpenRouter: голос уходит в Groq, у которого своя
+    квота, — ровно ради этого он и разведён. `0` в настройке выключает проверку:
+    у платного ключа суточного потолка нет.
+
+    Живёт здесь, а не в `capture`, потому что звонящих двое — разбор и `/ai`, а
+    тянуть на `admin` импорт `capture` (а с ним `lists`, `panel` и `ticker`)
+    ради одной строки не надо.
+    """
+    limit = settings.llm_daily_limit
+    return bool(limit) and calls_today() >= limit
+
+
+def last_failure() -> dict[str, Any] | None:
+    """Последняя строка, в которой ИИ отказал. Для `/ai`.
+
+    Из файла, а не из памяти процесса: домашний ПК перезапускается часто, и
+    «отказов не было» сразу после рестарта было бы ложью, а не ответом.
+
+    Признак отказа — непустое поле `reason`; его несёт ровно одна строка на
+    неудачную фразу (`via=llm`), и в ней же лежит `detail` — текст провайдера.
+    Строки запасного разбора носят своё поле `after` и сюда не попадают.
+
+    Файл читается целиком, но `/ai` зовут руками и редко, а потолок файла —
+    `MAX_BYTES`. Сбой чтения — `None`, не исключение.
+    """
+    try:
+        with PATH.open(encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except FileNotFoundError:
+        return None
+    except Exception:
+        log.warning("Не удалось прочитать %s", PATH, exc_info=True)
+        return None
+
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("reason"):
+            return record
+    return None
